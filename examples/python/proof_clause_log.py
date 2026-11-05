@@ -119,7 +119,7 @@ def _dependency_core(text):
                 raise ProofExportError("duplicate clause dependency identifier")
             entries[ident] = command, dependencies
             last = ident
-        elif command[0] != "declare-fun":
+        elif command[0] not in ("declare-sort", "declare-fun"):
             raise ProofExportError("unsupported trimmed-log command: %s" % command[0])
     if last is None or entries[last][0][0] != "infer" or len(entries[last][0]) != 3:
         raise ProofExportError("trimmed clause log has no final empty clause")
@@ -152,7 +152,7 @@ def _dependency_core(text):
 
     result = []
     for command in commands:
-        if command[0] == "declare-fun":
+        if command[0] in ("declare-sort", "declare-fun"):
             result.append(render(command))
         elif command[0] == "define-const" and command[1] in required:
             result.append(render(command))

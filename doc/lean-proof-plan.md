@@ -1193,6 +1193,22 @@ negations are covered too. Tests: `test_proof_certificate.py`
 `test_proof_to_lean_uf.py` (`UF_NEGATED_ITE_CONDITION`, both cores,
 nested negations, and rejection of a gate with its guard reversed).
 
+**Trimmed clause logs over uninterpreted sorts (2026-11-05).** Clause logs of
+at least 1 MB go through Z3's native trimmer and `_dependency_core`, which
+accepted only `declare-fun`, `define-const`, `assume`, and `infer` and so
+rejected the trimmer's leading `(declare-sort U 0)`: no QF_UF, QF_UFLRA, or
+QF_UFLIA input with a large log exported (`QG-classification-qg5`,
+`equality_diamond(11)`). The reducer now keeps `declare-sort` lines with the
+declarations, in log order; their shape (arity 0 only) is still checked by
+the replay. `QG-classification-qg5` now exports (704,547 nodes, not yet
+Lean-checked); `equality_diamond(11)` is Lean-checked. Tests:
+`test_proof_certificate.py` (`TestClauseLogDependencies`), and the forced
+trimmed path in `test_proof_to_lean_uf.py`, `test_proof_to_lean_uflra.py`, and
+`test_proof_to_lean_uflia.py`. Still open on the trimmed path: the native
+trimmer crashes on logs with `div`/`mod`/Real-division axiom hints and emits
+underivable or cyclic dependencies on some integer inputs (these fail
+explicitly).
+
 ## Arithmetic proof infrastructure
 
 ### Native implied-equality conclusions (2026-10-19)

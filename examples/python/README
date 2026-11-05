@@ -299,7 +299,9 @@ missing references and cycles, and replays every retained inference using the
 listed premises and independently proved Boolean gate clauses. These
 dependencies are untrusted hints, not proof rules. Incorrect trimming must
 fail replay or Lean checking. The compact exported DAG keeps every original
-assertion, even if its proof is outside the selected refutation.
+assertion, even if its proof is outside the selected refutation. Sort and
+function declarations are kept as they are; the replay checks them as it does
+for an untrimmed log.
 
 EUF hints can also contain cc/comm congruence annotations. These are not
 additional assumptions: the exported lemma contains only the actual Boolean
