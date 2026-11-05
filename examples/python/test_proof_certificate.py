@@ -2519,6 +2519,55 @@ _DEPENDENCY_LOG = """\
 (infer rup d5)
 """
 
+# Z3's native trimmer (`z3 -smt2 solver.proof.trim=true` on the sat.smt clause
+# log of _SORTED_DEPENDENCY_SOURCE), verbatim: like the raw log, it declares
+# the uninterpreted sort before the symbols over it.
+_SORTED_DEPENDENCY_SOURCE = """\
+(declare-sort U 0)
+(declare-fun a () U)
+(declare-fun b () U)
+(declare-fun f (U) U)
+(declare-const p Bool)
+(assert (= a b))
+(assert (or p (not (= (f a) (f b)))))
+(assert (not p))
+(check-sat)
+"""
+
+_SORTED_DEPENDENCY_LOG = """\
+(declare-sort U 0)
+(declare-fun b () U)
+(declare-fun a () U)
+(declare-fun deps (Int) Proof)
+(define-const $24 Bool (= a b))
+(define-const $37 Proof (deps 0))
+(assume $24 $37)
+(declare-fun p () Bool)
+(declare-fun f (U) U)
+(define-const $25 U (f b))
+(define-const $26 U (f a))
+(define-const $27 Bool (= $26 $25))
+(define-const $39 Proof (deps 1))
+(assume p (not $27) $39)
+(define-const $41 Proof (deps 2))
+(assume (not p) $41)
+(declare-fun rup () Proof)
+(declare-fun deps (Int Int Int) Proof)
+(define-const $43 Proof (deps 3 2 1))
+(infer (not $27) rup $43)
+(declare-fun euf (Bool Bool Proof) Proof)
+(declare-fun cc (Bool) Proof)
+(define-const $32 Bool (= $25 $26))
+(define-const $33 Proof (cc $32))
+(define-const $29 Bool (not $27))
+(define-const $34 Proof (euf $29 $24 $33))
+(define-const $45 Proof (deps 4))
+(infer (not $24) $27 $34 $45)
+(declare-fun deps (Int Int Int Int Int Int) Proof)
+(define-const $47 Proof (deps 6 0 4 3 1 2))
+(infer rup $47)
+"""
+
 
 class TestClauseLogDependencies(unittest.TestCase):
     def test_dependency_core_orders_forward_references_and_keeps_assertion_roots(self):
@@ -2537,6 +2586,36 @@ class TestClauseLogDependencies(unittest.TestCase):
                 reachable.add(node)
                 pending.extend(certificate["nodes"][node]["arguments"])
         self.assertEqual(len(reachable), len(certificate["nodes"]))
+
+    def test_dependency_core_keeps_uninterpreted_sort_declarations(self):
+        # Logs above _TRIM_THRESHOLD reach build_certificate through
+        # _dependency_core only, so every QF_UF, QF_UFLRA, and QF_UFLIA input
+        # with a large log depends on it passing the sort declarations on.
+        core = proof_clause_log._dependency_core(_SORTED_DEPENDENCY_LOG)
+        self.assertIn("(declare-sort U 0)", core)
+        self.assertLess(core.index("(declare-sort U 0)"), core.index("(declare-fun a () U)"))
+        context = z3.Context()
+        assertions, fragment = proof_certificate.parse_assertions(_SORTED_DEPENDENCY_SOURCE, context)
+        self.assertEqual(fragment, "qf_uf")
+        certificate = proof_clause_log.build_certificate(_SORTED_DEPENDENCY_SOURCE, fragment, assertions,
+                                                          core, context)
+        self.assertEqual(len(certificate["assertions"]), 3)
+        self.assertIn("U", {declaration["range"] for declaration in certificate["declarations"]})
+        self.assertEqual(certificate["rule_counts"]["th-lemma"], 1)  # the euf congruence
+
+    def test_trimmed_logs_reject_malformed_sorts_and_other_commands(self):
+        for bad in [
+            _SORTED_DEPENDENCY_LOG.replace("(declare-sort U 0)", "(declare-sort U 1)"),
+            _SORTED_DEPENDENCY_LOG.replace("(declare-sort U 0)", "(declare-sort U)"),
+            _SORTED_DEPENDENCY_LOG.replace("(declare-sort U 0)", "(declare-sort U 0)\n(push 1)"),
+            _SORTED_DEPENDENCY_LOG.replace("(declare-sort U 0)", "(declare-sort U 0)\n(declare-datatype D ((d)))"),
+        ]:
+            with self.subTest(bad=bad.split("\n", 2)[:2]):
+                with self.assertRaises(proof_certificate.ProofExportError):
+                    context = z3.Context()
+                    assertions, fragment = proof_certificate.parse_assertions(_SORTED_DEPENDENCY_SOURCE, context)
+                    proof_clause_log.build_certificate(_SORTED_DEPENDENCY_SOURCE, fragment, assertions,
+                                                       proof_clause_log._dependency_core(bad), context)
 
     def test_invalid_dependency_graphs_are_rejected(self):
         for bad, message in [
@@ -2580,6 +2659,25 @@ class TestClauseLogDependencies(unittest.TestCase):
             certificate = proof_certificate.export_clause_log_certificate(_LRA)
         self.assertEqual(certificate["fragment"], "qf_lra")
         self.assertEqual(len(certificate["assertions"]), 4)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmed_certificates_keep_uninterpreted_sorts(self):
+        # The trimmed path was exercised on QF_LRA only; every fragment with an
+        # uninterpreted sort failed in _dependency_core on the sort declaration.
+        cases = [(_UF, "qf_uf", {"U"}), (_UF_TWO_SORTS, "qf_uf", {"A", "B"}), (_UF_ITE, "qf_uf", {"U"}),
+                 (_UF_BOOL_ARGS, "qf_uf", {"U"}), (_UFLRA, "qf_uflra", {"U"}), (_UFLIA, "qf_uflia", {"U"})]
+        for source, fragment, sorts in cases:
+            with self.subTest(source=source.splitlines()[:3]):
+                untrimmed = proof_certificate.export_clause_log_certificate(source)
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                        patch.object(proof_clause_log, "_dependency_core",
+                                     wraps=proof_clause_log._dependency_core) as core:
+                    certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(core.call_count, 1)
+                self.assertEqual(certificate["fragment"], fragment)
+                self.assertEqual(len(certificate["assertions"]), len(untrimmed["assertions"]))
+                ranges = {declaration["range"] for declaration in certificate["declarations"]}
+                self.assertLessEqual(sorts, ranges)
 
 
 if __name__ == "__main__":

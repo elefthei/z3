@@ -538,6 +538,20 @@ class TestMixedLeanIntegration(_LeanIntegration):
         self.assertIn("th-lemma", certificate["rule_counts"])
         self.assertIn("No uninterpreted sort", text)
 
+    def test_trimmed_clause_logs_with_an_uninterpreted_sort_verify(self):
+        # Logs above proof_clause_log._TRIM_THRESHOLD go through Z3's native
+        # trimmer, whose output declares the sort; force that path.
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                patch.object(proof_clause_log, "_dependency_core",
+                             wraps=proof_clause_log._dependency_core) as core:
+            for name in ("uflra_sort_to_real", "uflra_real_to_sort"):
+                with self.subTest(name=name):
+                    core.reset_mock()
+                    certificate, _ = self.check(UFLRA_INPUTS[name])
+                    self.assertEqual(core.call_count, 1)
+                    self.assertIn("U", {declaration["range"] for declaration in certificate["declarations"]})
+                    self.assertIn("th-lemma", certificate["rule_counts"])
+
     # Seeds of random_instance whose unsat core has at least three assertions
     # (plain) and the first two such seeds with an uninterpreted sort, pinned
     # so the checked inputs stay the same across Z3 versions; seed 137 (plain)
