@@ -1615,6 +1615,45 @@ class TestUninterpretedLeanIntegration(unittest.TestCase):
                 self.assertIn("th-lemma", certificate["rule_counts"])
                 self.assertIn("(_bool (formula_", proof_to_lean.reconstruct(source, certificate))
 
+    def test_trimmed_clause_logs_with_uninterpreted_sorts_verify(self):
+        # Clause logs longer than proof_clause_log._TRIM_THRESHOLD are reduced
+        # by Z3's native trimmer (solver.proof.trim) before the replay; its
+        # output declares the sorts like the raw log. Force that path on every
+        # documented input: the certificate must keep the input's sorts and
+        # Lean must accept it like the untrimmed one.
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                patch.object(proof_clause_log, "_dependency_core",
+                             wraps=proof_clause_log._dependency_core) as core:
+            for name, source in UF_INPUTS.items():
+                with self.subTest(name=name):
+                    core.reset_mock()
+                    certificate, report = self.check(source)
+                    self.assertEqual(core.call_count, 1)
+                    sorts = set(re.findall(r"\(declare-sort ([^\s()]+)", source))
+                    self.assertTrue(sorts)
+                    self.assertLessEqual(sorts, {declaration["range"] for declaration in certificate["declarations"]})
+                    self.assertIn("th-lemma", certificate["rule_counts"])
+                    self.assertIn(".unsat' depends on axioms: " + _STANDARD_AXIOMS, report)
+
+    def test_clause_logs_above_the_trimming_threshold_are_exported(self):
+        # An 11-level equality diamond is the smallest one whose clause log
+        # exceeds _TRIM_THRESHOLD (1.3 MB), so its export takes the trimmed
+        # path without patching anything, like any large QF_UF benchmark
+        # (QG-classification-qg5-gensys_icl634 from the planned inputs). Export
+        # only: Lean checks the trimmed certificate in about two minutes.
+        source = equality_diamond(11)
+        commands, _, _ = proof_certificate.query_snapshot(source, None)
+        raw = proof_clause_log.run_clause_log(proof_certificate.default_z3_executable(), commands)
+        self.assertGreater(len(raw), proof_clause_log._TRIM_THRESHOLD, "re-pick the number of levels")
+        with patch.object(proof_clause_log, "_dependency_core",
+                          wraps=proof_clause_log._dependency_core) as core:
+            certificate = proof_certificate.export_clause_log_certificate(source)
+        self.assertEqual(core.call_count, 1)
+        self.assertEqual(certificate["fragment"], "qf_uf")
+        self.assertEqual(len(certificate["assertions"]), 12)
+        self.assertIn("U", {declaration["range"] for declaration in certificate["declarations"]})
+        self.assertIn("th-lemma", certificate["rule_counts"])
+
     def test_long_refutations_are_outlined_into_bounded_lemmas(self):
         # Seven levels give about 1,600 proof steps; as one nested term the main
         # theorem exhausts Lean's default heartbeat budget, outlined it checks

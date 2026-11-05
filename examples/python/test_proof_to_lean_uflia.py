@@ -626,6 +626,20 @@ class TestIntegerMixedLeanIntegration(unittest.TestCase):
         # Every hint kind of the slice, plus the exporter's own cnf bridge.
         self.assertEqual(hints, {"cut", "euf", "farkas", "implied-eq", "bound", "cnf", "arith"})
 
+    def test_trimmed_clause_logs_with_an_uninterpreted_sort_verify(self):
+        # Logs above proof_clause_log._TRIM_THRESHOLD go through Z3's native
+        # trimmer, whose output declares the sort; force that path.
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                patch.object(proof_clause_log, "_dependency_core",
+                             wraps=proof_clause_log._dependency_core) as core:
+            for name in ("uflia_sort_to_int", "uflia_int_to_sort", "uflia_all_hints"):
+                with self.subTest(name=name):
+                    core.reset_mock()
+                    certificate, _ = self.check(UFLIA_INPUTS[name])
+                    self.assertEqual(core.call_count, 1)
+                    self.assertIn("U", {declaration["range"] for declaration in certificate["declarations"]})
+                    self.assertIn("th-lemma", certificate["rule_counts"])
+
     # Seeds of random_instance whose unsat core has at least three assertions,
     # pinned so the checked inputs stay the same across Z3 versions: plain,
     # with an uninterpreted sort, and with ite terms. Seed 14 with ite terms
