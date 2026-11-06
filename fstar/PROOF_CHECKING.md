@@ -189,9 +189,15 @@ subchecker, not a complete SMT proof checker or an F* soundness theorem.
 
 The OCaml native bridge feeds local linear and input-conversion weights
 to the existing verified Farkas kernel, which checks the actual native
-formulas independently of the context certificate. Steps outside that
-kernel's fragment, including integer cuts and monomial rules, remain
-explicit obligations named `arith/lp-...`. Python/C++ replay coverage must
+formulas independently of the context certificate. Integer tightening
+uses its integer strengthening; Gomory cuts and Diophantine integer-lattice
+bounds are checked as integer splits whose two branches are replayed by
+that kernel. Other steps,
+including monomial rules, remain explicit obligations named `arith/lp-...`.
+When an LP derivation would otherwise be reported as `unsupported`, its
+inputs may also bind negated or strict integer bound literals to their
+tightened LP form (`(not (>= t c))` as `t <= c - 1`); the `lp-input` step
+is then justified by integer Farkas reasoning. Python/C++ replay coverage must
 not be confused with obligation-free F*/Pulse checking.
 
 ## Experiments and coverage

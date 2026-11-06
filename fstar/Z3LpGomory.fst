@@ -279,3 +279,96 @@ let candidate (context:C.certificate) (index:nat) : option certificate =
   Some { split = split; threshold = floor k;
          below = zero :: (below @ [one; times f (1,scale)]);
          above = zero :: (above @ [one; times (minus one f) (1,scale)]) }))))))
+
+(* Integer-lattice bounds from the Diophantine solver. The native row states
+   T = g*u + sum_i c_i*x_i for the pivot term T, a positive divisor g, an
+   integer combination u of integer columns, and columns x_i fixed by the
+   recorded lower/upper premises. A source bound on T is then tightened to the
+   nearest value congruent to the fixed part modulo g. This is an integer
+   split on u: one branch implies the conclusion, the other contradicts the
+   source bound. As for Gomory cuts, these candidates are only suggestions;
+   `check` replays both branches against the actual native formulas. *)
+type lattice_column =
+  | LatticeIntegral : coefficient:int -> term:expr -> lattice_column
+  | LatticeFixed : coefficient:rational -> lower:nat -> upper:nat -> value:rational -> lattice_column
+
+let lattice_column_of (context:C.certificate) (s:C.step) (divisor coefficient:rational) (j:nat)
+  : option lattice_column =
+  C.lookup context.variables j >>= (fun v ->
+  find_bounds j None s.bounds >>= (fun bounds ->
+  match bounds with
+  | Some b ->
+    (match b.lower, b.upper with
+     | Some lo, Some hi ->
+       bound_fact context s lo true >>= (fun l ->
+       bound_fact context s hi false >>= (fun h ->
+       if equal l.rhs h.rhs && l.relation <> C.Gt && h.relation <> C.Lt
+       then Some (LatticeFixed coefficient lo hi l.rhs) else None))
+     | _, _ -> None)
+  | None ->
+    divide coefficient divisor >>= (fun q ->
+    if v.integer && get_sort v.term = A.int_s && fst q % snd q = 0
+    then Some (LatticeIntegral (floor q) v.term) else None)))
+
+let rec lattice_columns (context:C.certificate) (s:C.step) (pivot:nat) (divisor:rational)
+                        (seen:list nat) (row:C.polynomial)
+  : Tot (option (list lattice_column)) (decreases row) =
+  match row with
+  | [] -> Some []
+  | (coefficient,j) :: rest ->
+    if L.mem j seen then None else
+    let next () = lattice_columns context s pivot divisor (j::seen) rest in
+    if j = pivot then (if equal coefficient (neg one) then next () else None)
+    else if equal coefficient zero then next ()
+    else lattice_column_of context s divisor coefficient j >>= (fun c ->
+      next () >>= (fun cs -> Some (c::cs)))
+
+(* `same` collects weights deriving sum_i c_i*x_i <= sum_i c_i*v_i from the
+   fixed bounds, `opposite` the reverse inequality. *)
+let rec lattice_weights (context:C.certificate) (s:C.step) (columns:list lattice_column)
+                        (constant:rational) (split:expr) (same opposite:list rational)
+  : Tot (option (rational & expr & list rational & list rational)) (decreases columns) =
+  match columns with
+  | [] -> Some (constant, split, same, opposite)
+  | LatticeIntegral n term :: rest ->
+    lattice_weights context s rest constant (add split (multiply n term)) same opposite
+  | LatticeFixed c lo hi value :: rest ->
+    let nonnegative = fst c >= 0 in
+    let magnitude = if nonnegative then c else neg c in
+    add_bound context s (not nonnegative) (if nonnegative then hi else lo) magnitude same >>= (fun same ->
+    add_bound context s nonnegative (if nonnegative then lo else hi) magnitude opposite >>= (fun opposite ->
+    lattice_weights context s rest (plus constant (times c value)) split same opposite))
+
+let lattice_candidate (context:C.certificate) (index:nat) : option certificate =
+  C.lookup context.steps index >>= (fun s ->
+  s.pivot >>= (fun pivot ->
+  let g = s.divisor in
+  if s.rule <> C.IntegerLattice || not (positive g) ||
+     s.equation.relation <> C.Eq || s.equation.contradiction ||
+     not (equal s.equation.rhs zero && equal s.equation.epsilon zero) ||
+     s.conclusion.contradiction ||
+     not (s.conclusion.relation = C.Le || s.conclusion.relation = C.Ge) ||
+     not (L.mem pivot (L.map (fun (term:rational & nat) -> snd term) s.equation.lhs))
+  then None else
+  let upper = s.conclusion.relation = C.Le in
+  find_bounds pivot None s.bounds >>= (fun found ->
+  found >>= (fun (b:C.column_bounds) ->
+  (if upper then b.upper else b.lower) >>= (fun source ->
+  lattice_columns context s pivot g [] s.equation.lhs >>= (fun columns ->
+  let weights = L.map (fun _ -> zero) s.premises in
+  lattice_weights context s columns zero (integer 0) weights weights >>=
+    (fun (constant, split, same, opposite) ->
+  fact_scale context.variables s.conclusion >>= (fun scale ->
+  divide (minus s.conclusion.rhs constant) g >>= (fun quotient ->
+  let threshold = if upper then floor quotient else 0 - floor (neg quotient) - 1 in
+  let conclusion_weight : rational = 1, scale in
+  if upper then
+    add_bound context s false source one opposite >>= (fun opposite ->
+    Some { split = split; threshold = threshold;
+           below = zero :: (same @ [g; conclusion_weight]);
+           above = zero :: (opposite @ [g; zero]) })
+  else
+    add_bound context s true source one same >>= (fun same ->
+    Some { split = split; threshold = threshold;
+           below = zero :: (same @ [g; zero]);
+           above = zero :: (opposite @ [g; conclusion_weight]) }))))))))))

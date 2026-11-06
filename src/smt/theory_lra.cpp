@@ -3776,7 +3776,7 @@ public:
         m_lp_proof = nullptr;
     }
 
-    proof_ref mk_lp_proof(lp::evidence_manager::proof_expression const& evidence) {
+    proof_ref mk_lp_proof(lp::evidence_manager::proof_expression const& evidence, bool integer_bounds) {
         expr_ref_vector variables(m);
         variables.resize(evidence.variables.size());
         auto const& deps = lp().dep_manager();
@@ -3812,7 +3812,7 @@ public:
         }
         for (auto const& [n1, n2] : m_eqs)
             premises.push_back(m.mk_hypothesis(m.mk_eq(n1->get_expr(), n2->get_expr())));
-        if (!lp::bind_evidence_inputs(m, evidence, variables, premises, inputs))
+        if (!lp::bind_evidence_inputs(m, evidence, variables, premises, inputs, integer_bounds))
             return proof_ref(m);
         proof_ref result = lp::mk_evidence_proof(m, evidence, variables, inputs);
         if (result && !m.is_false(m.get_fact(result)))
@@ -3828,23 +3828,41 @@ public:
     // set_evidence has filled m_core and m_eqs from exactly this explanation
     // (set_evidence skips the same constraint indices). Without coefficients
     // a proof consumer cannot replay the step.
+    //
+    // When neither an exactly bound LP derivation nor valid Farkas
+    // coefficients exist, the LP derivation is exported once more with
+    // integer-tightened inputs: an integer literal (not (>= t c)) enters the
+    // LP as t <= c - 1, which a consumer justifies by integer reasoning on the
+    // lp-input step. This replaces the otherwise unreplayable "unsupported"
+    // hint, e.g. for conflicts that rely on cuts or lattice bounds.
     void set_proof_params(symbol const& hint, bool with_consequent) {
         m_params.reset();
         if (!proofs_enabled())
             return;
+        lp::evidence_manager::proof_expression proof;
+        bool lp_checked = false;
+        auto set_unsupported = [&]() {
+            m_params.reset();
+            if (lp_checked) {
+                m_lp_proof = mk_lp_proof(proof, true);
+                if (m_lp_proof)
+                    return;
+            }
+            m_params.push_back(parameter(symbol("unsupported")));
+        };
         if (hint == m_farkas) {
             vector<std::pair<lp::constraint_index, lp::mpq>> coefficients;
-            lp::evidence_manager::proof_expression proof;
             lp().dep_manager().reconstruct(m_explanation.evidence(), proof);
-            if (proof.check()) {
-                m_lp_proof = mk_lp_proof(proof);
+            lp_checked = proof.check();
+            if (lp_checked) {
+                m_lp_proof = mk_lp_proof(proof, false);
                 if (m_lp_proof)
                     return;
             }
             if (!m_explanation.evidence() ||
                 !lp().dep_manager().linearize_coefficients(m_explanation.evidence(), lp::mpq(1), coefficients) ||
-                !proof.check()) {
-                m_params.push_back(parameter(symbol("unsupported")));
+                !lp_checked) {
+                set_unsupported();
                 return;
             }
         }
@@ -3868,10 +3886,8 @@ public:
         if (with_consequent)
             m_params.push_back(parameter(rational(1)));
         SASSERT(m_params.size() == 1 + m_core.size() + m_eqs.size() + (with_consequent ? 1 : 0));
-        if (hint == m_farkas && !check_farkas_conflict()) {
-            m_params.reset();
-            m_params.push_back(parameter(symbol("unsupported")));
-        }
+        if (hint == m_farkas && !check_farkas_conflict())
+            set_unsupported();
     }
 
     bool check_farkas_conflict() {

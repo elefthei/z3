@@ -159,6 +159,43 @@ ones being `th-lemma`. The unchanged 710-input replay retains all
 counts and no other changed pending counts. Frozen evidence is under
 `C:\smtlib-benchmarks\proof_gomory_20261018\final`.
 
+### Native LP integer-lattice bounds and tightened integer inputs
+
+`Z3LpGomory.lattice_candidate` checks `arith/lp-integer-lattice` steps
+from the Diophantine solver with the same verified integer-split
+certificate as Gomory cuts. The native row states `T = g*u + sum c_i*x_i`
+for the pivot term `T`, divisor `g`, an integer combination `u` of integer
+columns, and columns `x_i` fixed by recorded lower/upper premises. The
+split `u <= r` or `u >= r + 1` gives two Farkas branches: one derives the
+tightened conclusion, the other contradicts the source bound. No new
+semantic lemma is needed: `Z3LpGomory.check` and its existing soundness
+lemma replay both branches against the actual native premise and
+conclusion formulas, so incorrect rows, fixed values, divisors or
+thresholds only leave an obligation.
+
+Producer side, `theory_lra` previously emitted `th-lemma arith
+unsupported` with a bare `false` conclusion when an LP derivation could
+not bind its inputs and its flattened Farkas coefficients did not form a
+linear refutation. The common cause was integer tightening: the asserted
+literal `(not (>= t c))` over `Int` enters the LP as `t <= c - 1`, which is
+not syntactically equivalent to the literal. Only in that fallback
+situation, `bind_evidence_inputs(..., integer_bounds = true)` also matches
+such negated or strict integer bound literals with exactly the tightened
+bound. The resulting `lp-input` step is checked by the existing integer
+Farkas kernel (strict integer inequalities are strengthened by one).
+Proofs that were exported before are unchanged.
+
+In the SMT-LIB sample, `QF_LIA/rings_preprocessed/ring_2exp4_5vars_3ite_unsat`
+goes from `PARTIAL 27` to `ACCEPT` (its 27 former unsupported conflicts
+are now LP derivations whose integer-lattice steps are all checked) and `QF_LIA/tightrhombus/tightrhombus-283-245-1`
+goes from `PARTIAL 1` to `ACCEPT` (one Gomory cut). All other verdicts of
+the 242-case regression corpus are unchanged. Bridge regression
+`certified-native-integer-lattice-bounds` covers both bound directions,
+positive and negative fixed coefficients, stronger-than-justified
+conclusions, false conclusions, missing fixed bounds, non-unit pivot rows
+and non-lattice recipes; `test-z3 lp_evidence` covers the integer input
+binding and its rejections.
+
 ### QF_DT benchmark coverage (2026-10-18)
 
 A fixed 100-input QF_DT sample comes from the SMT-LIB 2025 archive
