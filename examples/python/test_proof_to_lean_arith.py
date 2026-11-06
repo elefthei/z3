@@ -84,14 +84,16 @@ _STANDARD_AXIOMS = "[propext, Classical.choice, Quot.sound]"
 # Real inputs written with integer numerals. Without (set-logic QF_LRA) or
 # with (set-logic ALL), Z3's parser reads 1 as an Int and coerces it into a
 # Real context as (to_real 1); (/ 1 3) becomes (/ (to_real 1) (to_real 3)).
-# A coerced numeral is a Real constant, so these are QF_LRA (QF_UFLRA with a
-# function) inputs; the decimal twins are already certified.
+# A coerced numeral, or a coerced variable-free Int term such as (- 3), is a
+# Real constant, so these are QF_LRA (QF_UFLRA with a function) inputs; the
+# decimal twins are already certified. (A coerced Int ite such as
+# (to_real (ite p 1 2)) is a different shape and is not pinned here.)
 REAL_COERCION_INPUTS = {
     "literal_bounds": ("(declare-const x Real)(assert (> x 1))(assert (< x 1))", "qf_lra"),
     "integer_coefficients": ("(declare-const x Real)(declare-const y Real)(assert (> x 4))"
                              "(assert (= (* 2 y) (+ x (- 3))))(assert (< y (/ 1 3)))", "qf_lra"),
-    "logic_all_ite": ("(set-logic ALL)(declare-const p Bool)(declare-const x Real)"
-                      "(assert (= x (ite p 1 2)))(assert (> x 3))", "qf_lra"),
+    "logic_all_boolean": ("(set-logic ALL)(declare-const p Bool)(declare-const x Real)"
+                          "(assert (=> p (> x 3)))(assert (=> (not p) (>= x 4)))(assert (< x 1))", "qf_lra"),
     "uf_argument": ("(declare-fun f (Real) Real)(declare-const x Real)"
                     "(assert (= x 1))(assert (not (= (f x) (f 1))))", "qf_uflra"),
 }
