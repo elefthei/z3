@@ -1062,6 +1062,25 @@ too (kept verbatim as `CONFIGURED_INPUTS` in the test modules); `3282.smt2`
 stays rejected for `rewriter.flat`, `3626.smt2` for
 `combined_solver.ignore_solver1`, and `3732.smt2` for its second query.
 
+**Integer numerals in a Real context (2026-11-06).** Without a QF_LRA or
+QF_UFLRA logic, or under `(set-logic ALL)`, Z3 reads `1` in a Real context
+as an Int and coerces it: `(> x 1)` becomes `(> x (to_real 1))`, and
+`(/ 1 3)` becomes `(/ (to_real 1) (to_real 3))`. The exporter rejected
+every `to_real` as mixed Int/Real arithmetic, so hand-written Real inputs
+using `1` instead of `1.0` could not be certified on either core.
+`proof_certificate._fold_numeral_coercions` now replaces each
+`(to_real t)` whose Int argument has no variables by the Real numeral of
+its value. This happens when the snapshot is parsed (`parse_assertions`,
+`parse_legacy_assertions`), so classification, the legacy solver, the
+clause-log replay, and the reconstructor's own parse all see the same
+formula. `to_real` is exact on integers, so the Lean theorem is about the
+input. `to_real` of a term with variables stays rejected. Still open:
+`(ite p 1 2)` in a Real context is a coerced Int `ite`, not a constant.
+Tests: `test_proof_certificate.py`
+(`test_integer_numerals_coerced_to_real_are_real_constants`) and
+`test_proof_to_lean_arith.py`
+(`test_integer_numerals_in_real_context_are_certified`, both cores).
+
 **Integer input through the legacy proof object (2026-10-16).** `--core
 legacy` rejected `qf_lia` and `qf_uflia` ("certified through the clause log
 only") because theory_lra's integer steps were not inventoried. A probe over

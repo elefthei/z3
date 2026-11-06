@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -581,15 +582,23 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
                 self.check(source)
 
     def test_integer_numerals_in_real_context_are_certified(self):
-        # Every input is rejected today with "unsupported arithmetic operator:
+        # Every input was rejected with "unsupported arithmetic operator:
         # to_real" (or, for (/ 1 3), "division is supported only by a nonzero
         # constant"), although only numerals are coerced.
+        # "Under the standard axioms" means at most those: the legacy proof of
+        # uf_argument is pure congruence and depends on [propext, Quot.sound]
+        # only, as does the proof of its decimal twin (f 1.0).
+        standard = {"propext", "Classical.choice", "Quot.sound"}
         for name, (source, fragment) in REAL_COERCION_INPUTS.items():
             for core in ("clause-log", "legacy"):
                 with self.subTest(name=name, core=core):
                     certificate, report = self.check(source, core)
                     self.assertEqual(certificate["fragment"], fragment)
-                    self.assertIn(_STANDARD_AXIOMS, report)
+                    if "unsat' does not depend on any axioms" in report:
+                        continue
+                    axioms = re.search(r"unsat' depends on axioms: \[([^\]]*)\]", report)
+                    self.assertIsNotNone(axioms, report)
+                    self.assertLessEqual({axiom.strip() for axiom in axioms.group(1).split(",")}, standard, report)
 
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
