@@ -2501,6 +2501,15 @@ class TestClauseLogReplay(unittest.TestCase):
         self.assertEqual({d["range"] for d in certificate["declarations"]}, {"Bool", "Int", "U", "Proof"})
 
 
+# Generator seeds whose natively trimmed clause logs end in a self-dependent
+# empty clause (test_proof_to_lean_uf.random_boolean_predicate_instance,
+# test_proof_to_lean_lia.random_instance(seed, 6, 16) and
+# test_proof_to_lean_arith.random_instance(seed, 6, 14)).
+TRIMMED_BOOLEAN_PREDICATE_SEEDS = (1, 2, 3)
+TRIMMED_LIA_SEEDS = (17, 26)
+TRIMMED_LRA_SEEDS = (24,)
+
+
 _DEPENDENCY_LOG = """\
 (declare-fun p () Bool)
 (declare-fun q () Bool)
@@ -2573,6 +2582,70 @@ class TestClauseLogDependencies(unittest.TestCase):
             with patch.object(proof_clause_log.subprocess, "run", return_value=warned):
                 with self.assertWarnsRegex(RuntimeWarning, "diagnostic"):
                     proof_clause_log.trim_clause_log("unused", _LRA_LOG)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimming_keeps_the_premises_of_the_empty_clause(self):
+        # The final empty clause must depend on the clauses that refute it,
+        # never on itself. Native trimming currently returns (deps N N) for
+        # it in two situations, and the dependency core rejects the log as
+        # "cyclic clause dependencies":
+        # - an assumed empty clause, e.g. from (assert false): the trimmer
+        #   uses an empty conflict clause as "no conflict yet";
+        # - a clause added while two of its literals are already false is
+        #   watched on false literals, so the units that falsify the rest
+        #   never reach a conflict before the final rup step.
+        logs = {
+            "assumed empty clause": ("""\
+(declare-fun p () Bool)
+(assume p)
+(assume)
+(assume (not p))
+(declare-fun rup () Proof)
+(infer rup)
+""", 1),
+            "late conflict": ("""\
+(declare-fun a () Bool)
+(declare-fun b () Bool)
+(declare-fun c () Bool)
+(declare-fun d () Bool)
+(assume (not a))
+(assume (not b))
+(assume a b c d)
+(assume (not c))
+(assume (not d))
+(declare-fun rup () Proof)
+(infer rup)
+""", 5),
+        }
+        for name, (log, premises) in logs.items():
+            with self.subTest(log=name):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    core = proof_clause_log.trim_clause_log(proof_certificate.default_z3_executable(), log)
+                commands = [line for line in core.splitlines() if line.startswith(("(assume", "(infer"))]
+                self.assertEqual(len(commands), premises + 1)
+                self.assertTrue(commands[-1].startswith("(infer rup "))
+                final = re.findall(r"\(deps ([0-9 ]+)\)", core)[-1].split()
+                self.assertNotIn(final[0], final[1:])
+                self.assertEqual(len(final), premises + 1)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmed_random_certificates_replay(self):
+        # Pinned random instances whose trimmed logs end in a self-dependent
+        # empty clause today: Boolean predicates with an assertion that is or
+        # simplifies to false, and integer and real instances with a late
+        # conflict.
+        from test_proof_to_lean_uf import random_boolean_predicate_instance
+        from test_proof_to_lean_lia import random_instance as random_lia_instance
+        from test_proof_to_lean_arith import random_instance as random_lra_instance
+        inputs = [("boolean predicates %d" % seed, random_boolean_predicate_instance(seed), "qf_uf")
+                  for seed in TRIMMED_BOOLEAN_PREDICATE_SEEDS]
+        inputs += [("lia %d" % seed, random_lia_instance(seed, 6, 16), "qf_lia") for seed in TRIMMED_LIA_SEEDS]
+        inputs += [("lra %d" % seed, random_lra_instance(seed, 6, 14), "qf_lra") for seed in TRIMMED_LRA_SEEDS]
+        for name, source, fragment in inputs:
+            with self.subTest(input=name):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(certificate["fragment"], fragment)
 
     @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
     def test_native_trimmed_certificate_replays(self):

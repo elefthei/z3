@@ -1536,6 +1536,18 @@ class TestUninterpretedLeanIntegration(unittest.TestCase):
                 certificate, _ = self.check(source)
                 self.assertIn("def-axiom", certificate["rule_counts"])
 
+    def test_native_trimmed_cores_with_an_assumed_empty_clause_are_checked_in_lean(self):
+        # An assertion that is or simplifies to false, like (assert false) in
+        # seed 1, puts an empty clause into the log; the native trimmer
+        # currently makes the final empty clause depend on itself instead of
+        # on that one ("cyclic clause dependencies").
+        from test_proof_certificate import TRIMMED_BOOLEAN_PREDICATE_SEEDS
+        for seed in TRIMMED_BOOLEAN_PREDICATE_SEEDS:
+            source = random_boolean_predicate_instance(seed)
+            with self.subTest(seed=seed):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    self.check(source)
+
     def test_boolean_predicates_without_a_sort_verify_through_the_clause_log(self):
         # The same inputs and seeds as the legacy-core test: the euf solver
         # sees the predicates because the exporter bypasses the frontend's
