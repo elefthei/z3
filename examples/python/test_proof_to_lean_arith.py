@@ -567,6 +567,23 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
             self.check(Z3TEST_LRA_INPUTS["lra_farkas"])
 
+    def test_deep_conjunction_is_certified(self):
+        # One assertion that is a right-nested binary and of depth 1,200 (the
+        # shape of SMT-LIB QF_IDL FISCHER6-4-ninc, PO4-10-PO4, OOO_neg.3steps):
+        # the clause log reaches the contradiction through and-elim steps
+        # across every level. Today the exporter crashes with a Python
+        # RecursionError before Lean sees anything.
+        depth = 1200
+        source = "(declare-const x Real)" + "".join("(declare-const y%d Real)" % i for i in range(depth))
+        conjunction = "(< x 0.0)"
+        for i in reversed(range(depth)):
+            conjunction = "(and (>= y%d 0.0) %s)" % (i, conjunction)
+        source += "(assert (> x 1.0))(assert %s)" % conjunction
+        certificate, report = self.check(source)
+        self.assertEqual(certificate["fragment"], "qf_lra")
+        self.assertGreaterEqual(certificate["rule_counts"]["and-elim"], depth)
+        self.assertIn(_STANDARD_AXIOMS, report)
+
     def test_outlined_proofs_preserve_original_assertions_and_scopes(self):
         with patch.object(proof_to_lean, "_OUTLINE_PROOF_STEPS", 0):
             for name in ("lra_farkas", "lra_fractions", "lra_boolean_structure", "lra_split_assertion"):

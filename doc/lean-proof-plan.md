@@ -1133,6 +1133,26 @@ tests of `test_proof_to_lean_integration.py`, `test_proof_to_lean_uf.py`,
 incremental corpus files are rejected for it first) and the
 `global-declarations` option (rejected).
 
+**Deep assertions through the clause log (2026-11-06).** The legacy exporter
+already walks assertions without Python recursion, but the clause-log replay
+did not. `_conjuncts` (the and-elim paths of an assertion) and the assumption
+matcher's `_Normalizer._key` used one or two Python frames per nesting level.
+So a nested `and` about 1,000 deep, or an `or`/`not` chain about 500 deep,
+aborted with `RecursionError` instead of a certificate or a
+`ProofExportError`. Three QF_IDL smtlib samples hit this: `FISCHER6-4-ninc`,
+`PO4-10-PO4`, and `OOO_neg.3steps`, each a single nested `and` 2,000 to
+42,000 levels deep. Both traversals now use explicit stacks. `_key` drives
+`_compute_key` as a generator that requests child keys, so the keys, their
+early exits, and the cache contents are unchanged. `OOO_neg.3steps` now
+exports and checks in Lean (12 s). Still open: `PO4-10-PO4` did not export
+within 600 s (one suspect: the and-elim paths copy their prefix, which is
+quadratic in depth), `FISCHER6`
+spends minutes in `assume`'s solver loop, and deep sums still recurse in
+`constant_value` and `_linear`. Tests: `test_proof_certificate.py`
+(`test_clause_log_deep_assertions_do_not_require_python_recursion`: `and`
+1,200, `or` 600, `not` 1,201, with the recursion limit unchanged) and
+`test_proof_to_lean_arith.py` (`test_deep_conjunction_is_certified`).
+
 **Propositional rewrites as direct proof terms (2026-10-16).** A Boolean
 `rewrite` step was proved by a truth table (a `cases` on every atom's
 decidability witness and `decide` per assignment), exponential in the number
