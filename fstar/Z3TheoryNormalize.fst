@@ -10,6 +10,7 @@ module D = Z3Definitions
 module AR = Z3ArithmeticRewrite
 module LE = Z3LinearArithmeticEmbed
 module LA = Z3LinearArithmeticAst
+module IE = Z3ArithImpliedEquality
 module QR = Z3QuantifierReduce
 module QN = Z3QuantifierNnf
 module LR = Z3LambdaRewrite
@@ -198,7 +199,8 @@ let sequent (facts:list expr) (conclusion:expr) : expr =
 let direct_consequence (facts:list expr) (conclusion:expr) : bool =
   Z3QuantifierPull.boolean_args facts && get_sort conclusion = bool_sort &&
   (LA.check (unit_coefficients conclusion facts) conclusion facts ||
-   tautology (sequent facts conclusion))
+   tautology (sequent facts conclusion) ||
+   IE.implied_equality facts conclusion)
 
 let lemma_direct_consequence (i:interpretation value) (rho:env value)
                              (facts:list expr) (conclusion:expr)
@@ -206,11 +208,12 @@ let lemma_direct_consequence (i:interpretation value) (rho:env value)
           (ensures lit_true i rho conclusion)
   = if LA.check (unit_coefficients conclusion facts) conclusion facts
     then LE.lemma_check_with_numeric_model (unit_coefficients conclusion facts) conclusion facts i rho
-    else (
+    else if tautology (sequent facts conclusion) then (
       lemma_tautology i rho (sequent facts conclusion);
       match eval i (App (B.connective_decl B.Conjunction facts) facts) rho with
       | VBool _ -> ()
       | _ -> ())
+    else IE.lemma_implied_equality facts conclusion i rho
 
 let rec contains (needle e:expr) : Tot bool (decreases e) =
   needle = e ||

@@ -1613,6 +1613,14 @@ let checked_theory_extensions () =
      "datatype-binder-capture", ["(= t (C a))"],
        "(forall ((t T)) ((_ is C) t))", false;
      "datatype-cyclic-equality", ["(= xs (cons (C a) xs))"], "false", false;
+     "implied-equality-integer-bounds",
+       ["(not (>= a 8))"; "(not (<= a 6))"], "(= 5 (+ (- 2) a))", true;
+     "implied-equality-chain",
+       ["(<= (+ b d) 5)"; "(>= (+ b d) 5)"; "(<= d 0)"; "(>= d 0)"], "(= 5 b)", true;
+     "implied-equality-weighted", ["(<= (* 2 a) 6)"; "(>= (* 3 a) 9)"], "(= a 3)", true;
+     "implied-equality-one-sided", ["(<= a 7)"], "(= 5 (+ (- 2) a))", false;
+     "implied-equality-wrong-value",
+       ["(not (>= a 8))"; "(not (<= a 6))"], "(= 6 (+ (- 2) a))", false;
      "bv-premise", ["(= (bvand v v) w)"], "(= v w)", true;
      "invalid-bv-consequence", ["(= (bvand v v) w)"], "(= v (bvnot w))", false];
   let c = context () in
@@ -2113,8 +2121,14 @@ let arithmetic_triangle_clauses () =
   check true "(or (not (= x y)) (<= (- x y) 0))";
   check true "(or (not (= x y)) (>= (- x y) 0))";
   check false "(or (not (= x y)) (< (- x y) 0))";
+  check true "(or (= 7.0 (+ (- 2.0) x)) (not (<= (+ (- 2.0) x) 7.0)) (not (>= (+ (- 2.0) x) 7.0)))";
+  check false "(or (= 7.0 x) (not (<= x 7.0)))";
+  check false "(or (= x 7.0) (not (< x 8.0)) (not (> x 6.0)))";
   check false "(or (not (= x y)) (<= (- x y) (- 1)))";
-  check false "(or (= x y) (not (< (- x y) 0)) (not (>= (- x y) 0)))";
+  (* Contradictory antecedents make this clause valid; a strict bound with
+     the same-direction weak bound does not imply the equality. *)
+  check true "(or (= x y) (not (< (- x y) 0)) (not (>= (- x y) 0)))";
+  check false "(or (= x y) (not (< (- x y) 0)) (not (<= (- x y) 0)))";
   check false "(or (= x y) (not (<= (- x y) 0)) (not (<= (- x y) 0)))";
   check false "(or (= x (+ 1 y)) (not (<= (- x y) 0)) (not (>= (- x y) 0)))"
 

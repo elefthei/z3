@@ -52,6 +52,29 @@ projection contract. The pre-existing untyped-environment foundation gap
 documented below remains; these are conditional semantic theorems, not
 an unconditional SMT-LIB soundness result.
 
+## Coefficient-free implied equalities
+
+`theory_lra` labels its fixed-variable equality propagations
+`th-lemma arith implied-eq` and supplies the bound premises, but no
+coefficients. Such a step, or a premise-free clause
+`(or (= a b) l1 ... ln)`, is now checked by
+[`Z3ArithImpliedEquality.fst`](Z3ArithImpliedEquality.fst): both
+`a <= b` and `a >= b` (in the clause form, the clause with the equality
+replaced by each bound) must pass the existing exact Farkas check
+`Z3LinearArithmeticAst.check`, including its per-literal strengthening of
+strict integer literals. Candidate weights come from a bounded,
+untrusted Fourier-Motzkin search (64 eliminations, 512 rows, 64 facts);
+only the replayed `check` enters the soundness argument
+(`lemma_implied_equality`, reached through
+`Z3TheoryNormalize.lemma_direct_consequence`). The equality itself follows
+from the two bounds by the existing numeric-model reflection.
+
+On the SMT-LIB sample this closes every pending `implied-eq`
+family in the Wisa/wisas and EufLaArithmetic QF_UFLIA inputs: 15 of the 20
+baseline `PARTIAL` inputs become `ACCEPT`. Bounds needing cuts beyond
+per-literal rounding, non-linear premises, or larger searches remain
+obligations.
+
 ## Result
 
 Arithmetic Farkas certificates now pass through the full proof exporter,

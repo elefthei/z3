@@ -205,7 +205,9 @@ let numeric_equality_checks () : bool =
   let ge = arithmetic_app ">=" op_arith_ge bool_sort in
   let lt = arithmetic_app "<" op_arith_lt bool_sort in
   let bounds = [le [x; y]; ge [x; y]] in
-  let bad_bounds = [lt [x; y]; ge [x; y]] in
+  (* `x < y` and `x <= y` do not imply `x = y`. (The former `x < y`, `x >= y`
+     pair is contradictory, so its triangle clause is valid.) *)
+  let bad_bounds = [lt [x; y]; le [x; y]] in
   let conjunction xs =
     App (Z3BooleanRewrite.connective_decl Z3BooleanRewrite.Conjunction xs) xs in
   let triangle xs =
@@ -215,7 +217,10 @@ let numeric_equality_checks () : bool =
   not (checked_consequence "rewrite" (mk_eq_expr (mk_eq_expr x y) (conjunction bad_bounds)) []) &&
   checked_theory_lemma (Unverified "th-lemma") (triangle bounds) [] &&
   not (checked_theory_lemma (Unverified "th-lemma") (triangle bad_bounds) []) &&
-  not (checked_theory_lemma (Unverified "assumed:nlsat") (triangle bounds) [])
+  not (checked_theory_lemma (Unverified "assumed:nlsat") (triangle bounds) []) &&
+  (* Coefficient-free `implied-eq` steps: both bounds must follow. *)
+  checked_theory_lemma (Unverified "th-lemma") (Equal x y) [Holds (le [x; y]); Holds (ge [x; y])] &&
+  not (checked_theory_lemma (Unverified "th-lemma") (Equal x y) [Holds (le [x; y]); Holds (le [x; y])])
 
 let lemma_numeric_equality_checks () : Lemma (numeric_equality_checks ()) =
   assert_norm (numeric_equality_checks ())
