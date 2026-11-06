@@ -7,8 +7,10 @@
 ############################################
 import copy
 import hashlib
+import os
 from pathlib import Path
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -203,6 +205,35 @@ LIA_INPUTS = {
 }
 
 _STANDARD_AXIOMS = "[propext, Classical.choice, Quot.sound]"
+# Seconds allowed for each Lean check of a dense Farkas lemma: the explicit
+# combination takes a few seconds; searching for it does not finish in minutes.
+_DENSE_BUDGET = 120
+
+
+def bounded_lean_runs(budget):
+    """Patch subprocess.run so that a Lean check fails after `budget` seconds.
+
+    The check script starts Lean as a grandchild, so the whole process group
+    is killed on expiry; a plain timeout would leave Lean running.
+    """
+    original = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if str(command[0]) != str(proof_to_lean._CHECK_LEAN):
+            return original(command, *args, **kwargs)
+        with subprocess.Popen(command, start_new_session=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=budget)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                raise AssertionError("Lean did not finish checking within %d seconds" % budget) from None
+        if kwargs.get("check") and process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    return patch.object(subprocess, "run", run)
 
 
 def random_instance(seed, variables=4, constraints=10, ite=False):
@@ -304,6 +335,35 @@ def wide_rewrite_instance(variables=9):
                                           " ".join("(> %s 7)" % name for name in names)))
     for name in names:
         lines.extend(["(assert (>= %s 5))" % name, "(assert (<= %s 7))" % name])
+    lines.append("(check-sat)")
+    return "\n".join(lines) + "\n"
+
+
+def dense_farkas_instance(seed, variables, scale=1000, sort="Int"):
+    """An infeasible linear system whose only refutation is one dense Farkas lemma.
+
+    `variables` random rows with coefficients in [-3, 3] and small bounds, plus
+    one row that cancels their combination with random weights in [1, scale]
+    and a bound one below the combined bound. The single farkas lemma names
+    every row, with the weights as coefficients, over every variable.
+    """
+    rnd = random.Random(seed)
+    rows = [[rnd.randint(-3, 3) for _ in range(variables)] for _ in range(variables)]
+    bounds = [rnd.randint(0, 5) for _ in range(variables)]
+    weights = [rnd.randint(1, scale) for _ in range(variables)]
+    rows.append([-sum(w * row[j] for w, row in zip(weights, rows)) for j in range(variables)])
+    bounds.append(-sum(w * b for w, b in zip(weights, bounds)) - 1)
+
+    def numeral(value):
+        text = str(abs(value)) + (".0" if sort == "Real" else "")
+        return text if value >= 0 else "(- %s)" % text
+
+    logic = "QF_LIA" if sort == "Int" else "QF_LRA"
+    lines = ["(set-logic %s)" % logic] + ["(declare-const x%d %s)" % (j, sort) for j in range(variables)]
+    for row, bound in zip(rows, bounds):
+        terms = ["(* %s x%d)" % (numeral(a), j) for j, a in enumerate(row) if a]
+        lines.append("(assert (<= %s %s))" % ("(+ %s)" % " ".join(terms) if len(terms) > 1 else terms[0],
+                                             numeral(bound)))
     lines.append("(check-sat)")
     return "\n".join(lines) + "\n"
 
@@ -729,6 +789,22 @@ class TestIntegerLeanIntegration(unittest.TestCase):
                 # need no axiom; otherwise the standard ones.
                 self.assertTrue(_STANDARD_AXIOMS in report or "does not depend on any axioms" in report, report)
             return certificate
+
+    def test_dense_farkas_lemma_is_checked_from_its_coefficients(self):
+        # One farkas lemma over 10 variables and 11 literals with weights up to
+        # 1,000 (the shape of SMT-LIB QF_LIA cut_lemmas/20-vars, where 25 of 82
+        # lemmas time out). The certificate carries the weights and the replay
+        # re-derives them, but Lean searches for the combination with
+        # `first | omega | grind`, which does not finish in minutes; the
+        # explicit combination closes the same lemma in about a second.
+        source = dense_farkas_instance(1, 10)
+        certificate = proof_certificate.export_clause_log_certificate(source)
+        farkas = [d["parameters"] for d in certificate["declarations"]
+                  if d["name"] == "th-lemma" and d["parameters"][:1] == ["farkas"]]
+        self.assertEqual(len(farkas), 1)
+        self.assertEqual(len(farkas[0]), 12)  # the hint and one weight per row
+        with bounded_lean_runs(_DENSE_BUDGET):
+            self.check(source)
 
     def test_documented_lia_inputs_verify_under_the_standard_axioms(self):
         hints = set()

@@ -563,6 +563,23 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
             with self.subTest(source=source):
                 self.check(source)
 
+    def test_dense_farkas_lemma_is_checked_from_its_coefficients(self):
+        # One farkas lemma over 20 Real variables and 21 literals with weights
+        # up to 1,000. The certificate carries the weights and the replay
+        # re-derives them, but Lean searches for the combination with grind,
+        # which does not finish in minutes; summing the scaled literals with
+        # the weights closes the same lemma in about two seconds.
+        from test_proof_to_lean_lia import _DENSE_BUDGET, bounded_lean_runs, dense_farkas_instance
+        source = dense_farkas_instance(1, 20, sort="Real")
+        certificate = proof_certificate.export_clause_log_certificate(source)
+        farkas = [d["parameters"] for d in certificate["declarations"]
+                  if d["name"] == "th-lemma" and d["parameters"][:1] == ["farkas"]]
+        self.assertEqual(len(farkas), 1)
+        self.assertEqual(len(farkas[0]), 22)  # the hint and one weight per row
+        with bounded_lean_runs(_DENSE_BUDGET):
+            _, report = self.check(source)
+        self.assertIn(_STANDARD_AXIOMS, report)
+
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
             self.check(Z3TEST_LRA_INPUTS["lra_farkas"])
