@@ -201,11 +201,14 @@ let lemma_numeric_normalization_checks_both_sorts ()
 let numeric_equality_checks () : bool =
   let x = typed_atom "x" (BaseSort "Real") in
   let y = typed_atom "y" (BaseSort "Real") in
+  let z = typed_atom "z" (BaseSort "Real") in
   let le = arithmetic_app "<=" op_arith_le bool_sort in
   let ge = arithmetic_app ">=" op_arith_ge bool_sort in
   let lt = arithmetic_app "<" op_arith_lt bool_sort in
   let bounds = [le [x; y]; ge [x; y]] in
-  let bad_bounds = [lt [x; y]; ge [x; y]] in
+  (* `x < y` together with `x >= y` is contradictory, so a triangle clause over
+     it is valid; this clause over two copies of `x < y` is falsified by x < y. *)
+  let bad_bounds = [lt [x; y]; lt [x; y]] in
   let conjunction xs =
     App (Z3BooleanRewrite.connective_decl Z3BooleanRewrite.Conjunction xs) xs in
   let triangle xs =
@@ -214,7 +217,13 @@ let numeric_equality_checks () : bool =
   checked_consequence "rewrite" (mk_eq_expr (mk_eq_expr x y) (conjunction bounds)) [] &&
   not (checked_consequence "rewrite" (mk_eq_expr (mk_eq_expr x y) (conjunction bad_bounds)) []) &&
   checked_theory_lemma (Unverified "th-lemma") (triangle bounds) [] &&
+  checked_theory_lemma (Unverified "th-lemma") (triangle [ge [x; y]; le [x; y]]) [] &&
   not (checked_theory_lemma (Unverified "th-lemma") (triangle bad_bounds) []) &&
+  (* Implied equalities: both non-strict halves need searched Farkas weights. *)
+  checked_theory_lemma (Unverified "th-lemma") (Holds (mk_eq_expr x y))
+    [Holds (lt [x; z]); Holds (mk_not_expr (lt [x; y])); Holds (le [x; y])] &&
+  not (checked_theory_lemma (Unverified "th-lemma") (Holds (mk_eq_expr x y))
+    [Holds (lt [x; z]); Holds (le [x; y])]) &&
   not (checked_theory_lemma (Unverified "assumed:nlsat") (triangle bounds) [])
 
 let lemma_numeric_equality_checks () : Lemma (numeric_equality_checks ()) =

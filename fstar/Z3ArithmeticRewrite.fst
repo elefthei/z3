@@ -137,7 +137,8 @@ let triangle_equality (e:expr) : bool =
   | App f [eq; App lf [l]; App uf [u]] ->
     B.connective_app B.Disjunction f [eq; App lf [l]; App uf [u]] &&
     lf = not_decl && uf = not_decl &&
-    split_equation eq (App (B.connective_decl B.Conjunction [l; u]) [l; u])
+    (split_equation eq (App (B.connective_decl B.Conjunction [l; u]) [l; u]) ||
+     split_equation eq (App (B.connective_decl B.Conjunction [u; l]) [u; l]))
   | _ -> false
 
 let equivalent (a b:expr) : bool =
@@ -450,7 +451,8 @@ let lemma_triangle_equality (e:expr) (i:interpretation value)
     (match eval i eq rho with VBool _ -> () | _ -> ())
   | App f [eq; App lf [l]; App uf [u]] ->
     let bounds = App (B.connective_decl B.Conjunction [l; u]) [l; u] in
-    lemma_split_equation eq bounds i nu rho;
+    if split_equation eq bounds then lemma_split_equation eq bounds i nu rho
+    else lemma_split_equation eq (App (B.connective_decl B.Conjunction [u; l]) [u; l]) i nu rho;
     (match eval i l rho, eval i u rho with
      | VBool _, VBool _ -> ()
      | _, _ -> ())
