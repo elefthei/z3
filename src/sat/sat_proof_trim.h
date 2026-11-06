@@ -35,6 +35,7 @@ namespace sat {
         uint_set       m_in_clause;
         uint_set       m_in_coi;
         clause*        m_conflict_clause = nullptr;
+        bool           m_has_conflict = false; // m_conflict is empty when the conflict is an empty clause
         vector<std::tuple<unsigned, literal_vector, clause*, bool, bool>> m_trail;
         vector<std::pair<unsigned, unsigned_vector>> m_result;
         
@@ -77,7 +78,7 @@ namespace sat {
 
         uint_set m_units;
         bool unit_or_binary_occurs();
-        void set_conflict(literal_vector const& c, clause* cp) { m_conflict.reset(); m_conflict.append(c); m_conflict_clause = cp;}
+        void set_conflict(literal_vector const& c, clause* cp) { m_conflict.reset(); m_conflict.append(c); m_conflict_clause = cp; m_has_conflict = true; }
         
     public:
 
