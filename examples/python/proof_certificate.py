@@ -94,7 +94,9 @@ _BOOLEAN_OPERATORS = {
 # division, plus the integer div and mod by a nonzero numeral and abs, which
 # are opaque atoms of the linear forms (Z3's arithmetic solver axiomatizes
 # div and mod by explicit clauses, see proof_clause_log, and rewrites abs to
-# an ite); to_real and to_int are rejected, and Int never mixes with Real.
+# an ite); to_real and to_int are rejected, and Int never mixes with Real,
+# except that an integer numeral coerced to Real is folded into the Real
+# numeral when the input is parsed (see _fold_numeral_coercions).
 _ARITH_PREDICATES = {z3.Z3_OP_LE, z3.Z3_OP_GE, z3.Z3_OP_LT, z3.Z3_OP_GT}
 _ARITH_OPERATORS = {z3.Z3_OP_ADD, z3.Z3_OP_SUB, z3.Z3_OP_UMINUS, z3.Z3_OP_MUL, z3.Z3_OP_DIV}
 _ARITH_NAMES = {
@@ -526,6 +528,42 @@ def classify_fragment(assertions):
     return "qf_lra" if real else "propositional"
 
 
+def _fold_numeral_coercions(assertions):
+    """Replace each (to_real t) whose Int argument t is variable-free by the Real numeral of its value.
+
+    Without a QF_LRA logic (or under ALL) Z3's parser reads an integer
+    numeral in a Real context as an Int and coerces it, so (> x 1) becomes
+    (> x (to_real 1)). to_real is exact on integers, so the folded assertion
+    is the same formula over Real constants, as (> x 1.0) would be. Any
+    to_real of a term with variables is left alone and rejected as mixed
+    Int/Real arithmetic by classify_fragment.
+    """
+    replacements, seen = [], set()
+    pending = list(assertions)
+    while pending:
+        expr = pending.pop()
+        if expr.get_id() in seen or not z3.is_app(expr):
+            continue
+        seen.add(expr.get_id())
+        if expr.decl().kind() == z3.Z3_OP_TO_REAL:
+            value = constant_value(expr.arg(0))
+            if value is not None:
+                replacements.append((expr, z3.RealVal(value, expr.ctx)))
+                continue
+        pending.extend(expr.children())
+    if not replacements:
+        return assertions
+    folded = z3.AstVector(ctx=assertions.ctx)
+    for assertion in assertions:
+        folded.push(z3.substitute(assertion, *replacements))
+    return folded
+
+
+def _parse_snapshot(source, context, query=None):
+    """Parse the assertion snapshot, folding integer numerals coerced to Real."""
+    return _fold_numeral_coercions(z3.parse_smt2_string(_assertion_commands(source, query), ctx=context))
+
+
 def _require_legacy_fragment(assertions, integer=False):
     """Return the fragment if the legacy proof object can certify it.
 
@@ -546,7 +584,7 @@ def _require_legacy_fragment(assertions, integer=False):
 
 def parse_legacy_assertions(source, context, integer=False, query=None):
     """Parse the assertion snapshot for the legacy proof object, with its fragment name."""
-    assertions = z3.parse_smt2_string(_assertion_commands(source, query), ctx=context)
+    assertions = _parse_snapshot(source, context, query)
     return assertions, _require_legacy_fragment(assertions, integer)
 
 
@@ -570,7 +608,7 @@ def parse_assertions(source, context, integer=False, query=None):
     reconstructor do; a harness that classifies input for other proof
     checkers keeps the previous fragments.
     """
-    assertions = z3.parse_smt2_string(_assertion_commands(source, query), ctx=context)
+    assertions = _parse_snapshot(source, context, query)
     fragment = classify_fragment(assertions)
     if fragment in _INTEGER_FRAGMENTS and not integer:
         raise ProofExportError("integer arithmetic (%s) is certified through the clause log and Lean alone; "

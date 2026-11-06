@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,23 @@ Z3TEST_LRA_INPUTS = {
 }
 
 _STANDARD_AXIOMS = "[propext, Classical.choice, Quot.sound]"
+
+# Real inputs written with integer numerals. Without (set-logic QF_LRA) or
+# with (set-logic ALL), Z3's parser reads 1 as an Int and coerces it into a
+# Real context as (to_real 1); (/ 1 3) becomes (/ (to_real 1) (to_real 3)).
+# A coerced numeral, or a coerced variable-free Int term such as (- 3), is a
+# Real constant, so these are QF_LRA (QF_UFLRA with a function) inputs; the
+# decimal twins are already certified. (A coerced Int ite such as
+# (to_real (ite p 1 2)) is a different shape and is not pinned here.)
+REAL_COERCION_INPUTS = {
+    "literal_bounds": ("(declare-const x Real)(assert (> x 1))(assert (< x 1))", "qf_lra"),
+    "integer_coefficients": ("(declare-const x Real)(declare-const y Real)(assert (> x 4))"
+                             "(assert (= (* 2 y) (+ x (- 3))))(assert (< y (/ 1 3)))", "qf_lra"),
+    "logic_all_boolean": ("(set-logic ALL)(declare-const p Bool)(declare-const x Real)"
+                          "(assert (=> p (> x 3)))(assert (=> (not p) (>= x 4)))(assert (< x 1))", "qf_lra"),
+    "uf_argument": ("(declare-fun f (Real) Real)(declare-const x Real)"
+                    "(assert (= x 1))(assert (not (= (f x) (f 1))))", "qf_uflra"),
+}
 
 # Real-valued ite terms: an opaque variable to Farkas reasoning, tied to its
 # branches by gate clauses, and normalized by Z3 (abs/max shapes are rewritten).
@@ -562,6 +580,25 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
         ]:
             with self.subTest(source=source):
                 self.check(source)
+
+    def test_integer_numerals_in_real_context_are_certified(self):
+        # Every input was rejected with "unsupported arithmetic operator:
+        # to_real" (or, for (/ 1 3), "division is supported only by a nonzero
+        # constant"), although only numerals are coerced.
+        # "Under the standard axioms" means at most those: the legacy proof of
+        # uf_argument is pure congruence and depends on [propext, Quot.sound]
+        # only, as does the proof of its decimal twin (f 1.0).
+        standard = {"propext", "Classical.choice", "Quot.sound"}
+        for name, (source, fragment) in REAL_COERCION_INPUTS.items():
+            for core in ("clause-log", "legacy"):
+                with self.subTest(name=name, core=core):
+                    certificate, report = self.check(source, core)
+                    self.assertEqual(certificate["fragment"], fragment)
+                    if "unsat' does not depend on any axioms" in report:
+                        continue
+                    axioms = re.search(r"unsat' depends on axioms: \[([^\]]*)\]", report)
+                    self.assertIsNotNone(axioms, report)
+                    self.assertLessEqual({axiom.strip() for axiom in axioms.group(1).split(",")}, standard, report)
 
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
