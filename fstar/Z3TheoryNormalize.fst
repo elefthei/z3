@@ -10,6 +10,7 @@ module D = Z3Definitions
 module AR = Z3ArithmeticRewrite
 module LE = Z3LinearArithmeticEmbed
 module LA = Z3LinearArithmeticAst
+module IE = Z3ArithImpliedEq
 module QR = Z3QuantifierReduce
 module QN = Z3QuantifierNnf
 module LR = Z3LambdaRewrite
@@ -325,10 +326,18 @@ let rec lemma_propagate (fuel:nat) (i:interpretation value) (rho:env value)
       lemma_propagate (fuel - 1) i rho (replace_args source target facts)
         (replace source target conclusion)
 
-let consequence (facts:list expr) (conclusion:expr) : bool = propagate 8 facts conclusion
+(* Arithmetic implied equalities (`th-lemma arith implied-eq`) and their
+   clausal triangle form carry no coefficients; both bounds of the equality
+   are re-checked as Farkas certificates found by an untrusted search. *)
+let consequence (facts:list expr) (conclusion:expr) : bool =
+  propagate 8 facts conclusion || IE.implied_equality facts conclusion ||
+  IE.implied_clause conclusion
 
 let lemma_consequence (i:interpretation value) (rho:env value)
                       (facts:list expr) (conclusion:expr)
   : Lemma (requires normalization_model i /\ conj_holds i rho facts /\ consequence facts conclusion)
           (ensures lit_true i rho conclusion) =
-  lemma_propagate 8 i rho facts conclusion
+  if propagate 8 facts conclusion then lemma_propagate 8 i rho facts conclusion
+  else if IE.implied_equality facts conclusion
+  then IE.lemma_implied_equality i rho facts conclusion
+  else IE.lemma_implied_clause i rho conclusion
