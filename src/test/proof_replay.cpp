@@ -19,6 +19,7 @@ Abstract:
 #include "parsers/smt2/smt2parser.h"
 #include "sat/sat_proof_trim.h"
 #include "sat/smt/arith_theory_checker.h"
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 
@@ -389,8 +390,65 @@ static void tst_trim_satisfied_clause() {
     ENSURE(core[2].first == 5);
 }
 
+// The empty clause is assumed (an assertion that folds to false): the final
+// empty clause must depend on it, not overwrite its id and depend on itself.
+static void tst_trim_assumed_empty_clause() {
+    params_ref params;
+    reslimit limit;
+    sat::proof_trim trim(params, limit);
+    sat::literal p(trim.mk_var(), false);
+    trim.init_clause();
+    trim.add_literal(p.var(), p.sign());
+    trim.assume(0);
+    trim.init_clause();
+    trim.assume(1);
+    trim.init_clause();
+    trim.add_literal(p.var(), !p.sign());
+    trim.assume(2);
+    trim.init_clause();
+    trim.infer(3);
+    auto core = trim.trim();
+    ENSURE(core.size() == 2);
+    ENSURE(core[0].first == 1);
+    ENSURE(core[1].first == 3);
+    ENSURE(core[1].second.size() == 1 && core[1].second[0] == 1);
+}
+
+// a or b or c or d is added after ~a and ~b, so it is watched on false
+// literals; the units ~c and ~d falsify it later. The final empty clause
+// must depend on all five clauses, not on itself.
+static void tst_trim_late_conflict() {
+    params_ref params;
+    reslimit limit;
+    sat::proof_trim trim(params, limit);
+    sat::literal a(trim.mk_var(), false), b(trim.mk_var(), false), c(trim.mk_var(), false), d(trim.mk_var(), false);
+    auto assume = [&](unsigned id, std::initializer_list<sat::literal> literals) {
+        trim.init_clause();
+        for (auto literal : literals)
+            trim.add_literal(literal.var(), literal.sign());
+        trim.assume(id);
+    };
+    assume(0, {~a});
+    assume(1, {~b});
+    assume(2, {a, b, c, d});
+    assume(3, {~c});
+    assume(4, {~d});
+    trim.init_clause();
+    trim.infer(5);
+    auto core = trim.trim();
+    ENSURE(core.size() == 6);
+    ENSURE(core.back().first == 5);
+    auto deps = core.back().second;
+    std::sort(deps.begin(), deps.end());
+    ENSURE(deps.size() == 5);
+    for (unsigned i = 0; i < 5; ++i)
+        ENSURE(deps[i] == i);
+}
+
 void tst_proof_replay() {
     tst_trim_satisfied_clause();
+    tst_trim_assumed_empty_clause();
+    tst_trim_late_conflict();
     tst_is_extended_numeral();
     tst_checker_nary_mul();
     tst_checker_printed_numerals();

@@ -171,6 +171,46 @@ canary lists live in `Z3Prover/z3test/regressions/proofs/canaries/`. The runner 
 exit nonzero on `checker-rejected` and `crash`, and must report fallbacks
 separately from verified results.
 
+**Native proof trimming keeps the empty clause's premises (2026-11-06).**
+Clause logs of at least 1 MB are reduced by `solver.proof.trim=true`
+(`sat::proof_trim`) before the Lean replay. For many logs, the final
+`(infer rup)` came out as `(deps N N)`: the empty clause depended only on
+itself, and the exporter rightly rejected it ("cyclic clause dependencies").
+There were two causes.
+
+1. An assumed empty clause, from an assertion that folds to false, was
+   not recorded as a conflict, because `proof_trim` tested
+   `!m_conflict.empty()`. The final empty clause then overwrote its id.
+2. At base level, a clause is watched on its first literals even when they
+   are already false, so later units could falsify it without a conflict.
+   The final empty clause then became its own conflict.
+
+The trimmer now tracks the conflict with a flag and keeps the id of an
+assumed empty clause. Before a derived empty clause can become its own
+conflict, the trimmer propagates the whole trail again, as its probes
+already do.
+
+Results with trimming forced, random generators, seeds 1 to 59:
+
+- Boolean predicates: 41 of 43 unsat instances export (29 failed before).
+- QF_LIA: 36 of 38.
+- QF_LRA: 16 of 19.
+- QF_LRA with `ite`: 13 of 22.
+- QF_UF: 13 of 13.
+
+Still failing: 3 self-dependent instances, where the final step does not
+follow by propagation in the trimmer's clause set, and 13 instances
+rejected as "inferred clause is not derivable by unit propagation"
+(another trimmer defect). Tests:
+
+- `test_proof_certificate.py`:
+  `test_native_trimming_keeps_the_premises_of_the_empty_clause` and
+  `test_native_trimmed_random_certificates_replay`;
+- Lean checks of the pinned seeds in `test_proof_to_lean_uf.py`,
+  `test_proof_to_lean_lia.py`, and `test_proof_to_lean_arith.py`;
+- native: `test-z3 proof_replay` (`tst_trim_assumed_empty_clause`,
+  `tst_trim_late_conflict`).
+
 ### First matrix run (2026-09-25)
 
 `examples/python/proof_matrix.py` implements the runner. A canary of 86

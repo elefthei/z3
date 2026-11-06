@@ -563,6 +563,16 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
             with self.subTest(source=source):
                 self.check(source)
 
+    def test_native_trimmed_cores_ending_in_a_late_conflict_are_checked_in_lean(self):
+        # A trimmed log whose final empty clause the native trimmer currently
+        # makes depend on itself ("cyclic clause dependencies").
+        from test_proof_certificate import TRIMMED_LRA_SEEDS
+        for seed in TRIMMED_LRA_SEEDS:
+            with self.subTest(seed=seed):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    _, report = self.check(random_instance(seed, 6, 14))
+                self.assertIn(_STANDARD_AXIOMS, report)
+
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
             self.check(Z3TEST_LRA_INPUTS["lra_farkas"])

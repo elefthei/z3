@@ -349,12 +349,29 @@ namespace sat {
         m_clause.shrink(j);
         if (unit_or_binary_occurs())
             return;        
-        if (!m_conflict.empty() && m_clause.empty()) {
-            m_clauses.insert(m_clause, { {}, id, m_clause.empty() });
+        // Once in conflict, only the final empty clause is recorded. An empty
+        // clause assumed earlier keeps its id: the final one depends on it.
+        if (m_has_conflict && m_clause.empty()) {
+            m_clauses.insert_if_not_there(m_clause, { {}, id, true });
             m_trail.push_back({ id , m_clause, nullptr, true, is_initial });
         }
-        if (!m_conflict.empty())
-            return;        
+        if (m_has_conflict)
+            return;
+        if (m_clause.empty() && !is_initial) {
+            // At base level a clause is watched on its first literals even if
+            // they were already false when it was added, so later units may
+            // miss it. Propagate the whole trail again before a derived empty
+            // clause would be taken as its own conflict.
+            s.m_qhead = 0;
+            s.propagate(false);
+            if (s.inconsistent()) {
+                IF_VERBOSE(3, verbose_stream() << "conflict on re-propagation\n");
+                m_clauses.insert_if_not_there(m_clause, { {}, id, true });
+                m_trail.push_back({ id, m_clause, nullptr, true, is_initial });
+                set_conflict(m_clause, nullptr);
+                return;
+            }
+        }
 
         IF_VERBOSE(3, verbose_stream() << (is_initial?"assume ":"rup ") << m_clause << "\n");
         auto* cl = s.mk_clause(m_clause, status::redundant());

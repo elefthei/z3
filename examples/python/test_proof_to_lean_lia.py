@@ -730,6 +730,15 @@ class TestIntegerLeanIntegration(unittest.TestCase):
                 self.assertTrue(_STANDARD_AXIOMS in report or "does not depend on any axioms" in report, report)
             return certificate
 
+    def test_native_trimmed_cores_ending_in_a_late_conflict_are_checked_in_lean(self):
+        # Trimmed logs whose final empty clause the native trimmer currently
+        # makes depend on itself ("cyclic clause dependencies").
+        from test_proof_certificate import TRIMMED_LIA_SEEDS
+        for seed in TRIMMED_LIA_SEEDS:
+            with self.subTest(seed=seed):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    self.check(random_instance(seed, 6, 16))
+
     def test_documented_lia_inputs_verify_under_the_standard_axioms(self):
         hints = set()
         for name, source in LIA_INPUTS.items():
