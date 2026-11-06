@@ -259,6 +259,18 @@ let rec all_edges (r:relation) (js:list judgment) : Tot bool (decreases js) =
   | [] -> true
   | j :: rest -> Some? (edge r j) && all_edges r rest
 
+(* Boolean-skeleton size above which a rewrite is not handed to the
+   tree-expanding equivalence procedures. z3 hash-conses formulas, so a
+   conclusion with a few thousand distinct nodes can unfold into a tree of
+   millions; the procedures below walk that tree (often repeatedly) and do not
+   finish within the case budget. Such steps stay pending unless an earlier,
+   sharing-aware check justifies them. *)
+let rewrite_search_budget : nat = 1000000
+
+let rewrite_search_feasible (a b:expr) : bool =
+  Some? (D.boolean_budget rewrite_search_budget a) ||
+  Some? (D.boolean_budget rewrite_search_budget b)
+
 let relational_step (kind:rule) (concl:judgment) (facts:list judgment) : bool =
   match relational concl with
   | None -> false
@@ -276,11 +288,13 @@ let relational_step (kind:rule) (concl:judgment) (facts:list judgment) : bool =
                       Z3DistinctAst.duplicate_rewrite a b ||
                       Z3DistinctEmbed.expansion_rewrite a b ||
                       constant_quantifier_rewrite a b ||
-                      boolean_equiv 8 10 a b || A.equivalent 64 a b || AR.equivalent a b ||
-                      QR.equivalent 64 a b || LR.rewrite a b ||
-                      CR.equivalent a b || IR.equivalent a b || QV.equivalent 64 a b ||
-                      TN.equivalent a b ||
-                      boolean_search a b)
+                      shared_boolean_equiv 3 a b ||
+                      (rewrite_search_feasible a b &&
+                       (boolean_equiv 8 10 a b || A.equivalent 64 a b || AR.equivalent a b ||
+                        QR.equivalent 64 a b || LR.rewrite a b ||
+                        CR.equivalent a b || IR.equivalent a b || QV.equivalent 64 a b ||
+                        TN.equivalent a b ||
+                        boolean_search a b)))
      | Commutativity -> r = Equality && facts = [] && commutativity_step a b
      | Symmetry ->
        (match facts with
@@ -831,6 +845,7 @@ let lemma_relational_step_sound (i:interpretation value) (rho:env value)
          else if Z3DistinctEmbed.expansion_rewrite a b then
            Z3DistinctEmbed.lemma_expansion_rewrite_sound i rho a b
          else if constant_quantifier_rewrite a b then lemma_constant_quantifier_sound i rho a b
+         else if shared_boolean_equiv 3 a b then lemma_shared_boolean_equiv_sound 3 i rho a b
          else if boolean_equiv 8 10 a b then lemma_boolean_equiv_sound 8 10 i rho a b
          else if A.equivalent 64 a b then A.lemma_equivalent_sound 64 i rho a b
          else if AR.equivalent a b then AR.lemma_equivalent_with_numeric_model a b i rho

@@ -1571,6 +1571,23 @@ semantic equality. Non-Boolean theory atoms remain opaque except for the
 proved reflexive-equality rule. Budget exhaustion means unverified, not
 equivalent; no runtime solver call or additional trust assumption is used.
 
+Because z3 hash-conses terms, a `rewrite` conclusion with a few thousand
+distinct nodes can unfold into a tree of millions, and the structural
+check above expands the full Boolean height of both sides. Before those
+procedures, `relational_step` therefore tries
+`Z3BooleanRewrite.shared_boolean_equiv 3`: the same skeleton comparison,
+cut at depth 3 with the shared subexpressions as opaque boundaries.
+`lemma_shared_boolean_equiv_sound` reuses `lemma_boolean_cut_sound` and
+`N.lemma_equivalent_sound`. If both sides also exceed
+`rewrite_search_budget` (10^6 Boolean skeleton nodes, counted with
+`Z3Definitions.boolean_budget`), the tree-expanding procedures are skipped
+and the step stays pending. In
+`QF_IDL/Averest/buble_sort/BubbleSort_safe_bgmc007.smt2`, the only such
+step is the single coarse `rewrite` that the proof-producing
+`ctx-simplify` tactic emits for the whole asserted formula. That rewrite
+has 5,228 and 3,909 distinct nodes but tree sizes of about 10^7 and
+2·10^6. The case changes from `TIMEOUT` to `PARTIAL 2`.
+
 Boolean `ite` is exported with `op_ite` (Z3's declaration name is `if`).
 Both Boolean classifiers require three Boolean arguments and a Boolean
 result. The verified cut lowers it to `and`/`or`/`not`, reducing constant
