@@ -1216,6 +1216,25 @@ class TestProofToLeanIntegration(unittest.TestCase):
                     self.assertIn("private theorem proof_step_", text)
                     self.assertNotIn("Classical", text)
 
+    def test_outlined_propositional_refutation_over_many_assertions(self):
+        # Outlined lemmas take every original assertion as one bundled
+        # hypothesis. With 1,203 assertions (1,200 unused clauses before a
+        # three-assertion core), checking the bundle and projecting the core
+        # out of it must stay within Lean's default limits; today Lean reports
+        # "maximum recursion depth has been reached". The refutation must stay
+        # axiom-free and keep one hypothesis per original assertion.
+        padding = 1200
+        source = "".join("(declare-const q%d Bool)(declare-const r%d Bool)" % (i, i) for i in range(padding))
+        source += "(declare-const a Bool)(declare-const b Bool)"
+        source += "".join("(assert (or q%d r%d))" % (i, i) for i in range(padding))
+        source += "(assert (or a b))(assert (not a))(assert (=> b a))"
+        certificate = proof_certificate.export_certificate(source)
+        self.assertEqual(len(certificate["assertions"]), padding + 3)
+        with patch.object(proof_to_lean, "_OUTLINE_PROOF_STEPS", 0):
+            text = self.check(source, certificate)
+        self.assertIn("private theorem proof_step_", text)
+        self.assertNotIn("Classical", text)
+
     def test_long_propositional_refutation_is_outlined(self):
         # The pigeonhole principle for five holes: about 1,600 proof steps, which
         # exhaust Lean's default heartbeat budget as one nested term.
