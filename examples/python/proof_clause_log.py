@@ -547,16 +547,35 @@ class _Normalizer:
         return self._key(expr, True)
 
     def _key(self, expr, polarity):
+        """Evaluate _compute_key with an explicit stack, so deep formulas need no Python recursion."""
         index = expr.get_id(), polarity
         cached = self.cache.get(index)
-        if cached is None:
-            cached = self.cache[index] = (expr, self._compute_key(expr, polarity))
-        return cached[1]
+        if cached is not None:
+            return cached[1]
+        stack, value = [(index, expr, self._compute_key(expr, polarity))], None
+        while stack:
+            index, expr, steps = stack[-1]
+            try:
+                child, child_polarity = steps.send(value)
+            except StopIteration as done:
+                stack.pop()
+                self.cache[index] = (expr, done.value)
+                value = done.value
+                continue
+            child_index = child.get_id(), child_polarity
+            cached = self.cache.get(child_index)
+            if cached is not None:
+                value = cached[1]
+            else:
+                stack.append((child_index, child, self._compute_key(child, child_polarity)))
+                value = None
+        return value
 
     def _compute_key(self, expr, polarity):
+        """Return the key of expr under polarity; yields (child, polarity) to receive a child's key."""
         kind = expr.decl().kind()
         if kind == z3.Z3_OP_NOT:
-            return self._key(expr.arg(0), not polarity)
+            return (yield expr.arg(0), not polarity)
         if kind in (z3.Z3_OP_AND, z3.Z3_OP_OR):
             if (kind == z3.Z3_OP_AND) == polarity:
                 tag = "and"
@@ -566,7 +585,7 @@ class _Normalizer:
             identity = ("true",) if tag == "and" else ("false",)
             absorbing = ("false",) if tag == "and" else ("true",)
             for child in expr.children():
-                child_key = self._key(child, polarity)
+                child_key = yield child, polarity
                 if child_key == absorbing:
                     return absorbing
                 if child_key == identity:
@@ -581,7 +600,7 @@ class _Normalizer:
                 return next(iter(parts))
             return (tag, tuple(sorted(parts, key=repr)))
         if kind == z3.Z3_OP_IMPLIES:
-            return self._key(z3.Or(z3.Not(expr.arg(0)), expr.arg(1)), polarity)
+            return (yield z3.Or(z3.Not(expr.arg(0)), expr.arg(1)), polarity)
         if kind == z3.Z3_OP_TRUE:
             return ("true",) if polarity else ("false",)
         if kind == z3.Z3_OP_FALSE:
@@ -592,7 +611,10 @@ class _Normalizer:
             return self._atom(expr.arg(0) == expr.arg(1), not polarity)
         # Structural key: a numeral (as a function argument) is identified by
         # its value, an uninterpreted symbol by its name.
-        positive = (kind, tuple(self._key(child, True) for child in expr.children()),
+        children = []
+        for child in expr.children():
+            children.append((yield child, True))
+        positive = (kind, tuple(children),
                     str(expr.decl().name()) if kind == z3.Z3_OP_UNINTERPRETED
                     else str(numeral_value(expr)) if kind == z3.Z3_OP_ANUM else "")
         return positive if polarity else ("not", positive)
@@ -624,12 +646,14 @@ class _Normalizer:
         return ("not", ("le", negated)) if polarity else ("le", negated)
 
 
-def _conjuncts(expr, path=()):
-    """Yield (formula, and-elim path) for every conjunct reachable through nested ands."""
-    yield expr, path
-    if expr.decl().kind() == z3.Z3_OP_AND:
-        for child in expr.children():
-            yield from _conjuncts(child, path + (child,))
+def _conjuncts(expr):
+    """Yield (formula, and-elim path) for every conjunct reachable through nested ands, in preorder."""
+    stack = [(expr, ())]
+    while stack:
+        expr, path = stack.pop()
+        yield expr, path
+        if expr.decl().kind() == z3.Z3_OP_AND:
+            stack.extend((child, path + (child,)) for child in reversed(expr.children()))
 
 
 class _Replay:
