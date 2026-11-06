@@ -730,6 +730,18 @@ class TestIntegerLeanIntegration(unittest.TestCase):
                 self.assertTrue(_STANDARD_AXIOMS in report or "does not depend on any axioms" in report, report)
             return certificate
 
+    def test_native_trimmed_division_cores_are_checked_in_lean(self):
+        # Large integer logs are trimmed natively before the replay. With div
+        # or mod in the input the log carries `arith` axiom hints, on which
+        # native trimming currently crashes; the trimmed core must instead be
+        # replayed and certified like the full log, arith lemmas included.
+        for name in ("lia_div", "lia_negative_divisor", "lia_div_sum"):
+            with self.subTest(name=name):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    certificate = self.check(LIA_INPUTS[name])
+                if name != "lia_negative_divisor":  # its trimmed core needs no theory lemma
+                    self.assertIn("arith", _hints(certificate))
+
     def test_documented_lia_inputs_verify_under_the_standard_axioms(self):
         hints = set()
         for name, source in LIA_INPUTS.items():

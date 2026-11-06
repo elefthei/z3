@@ -2575,6 +2575,42 @@ class TestClauseLogDependencies(unittest.TestCase):
                     proof_clause_log.trim_clause_log("unused", _LRA_LOG)
 
     @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimming_accepts_hints_without_a_checker_plugin(self):
+        # The arithmetic solver records its own axioms (the div and mod
+        # definitions) under the hint `arith`, for which Z3's theory checker
+        # has no plugin. Native trimming asks the checker for the clause of
+        # every non-rup hint and crashes (SIGSEGV) on this one, so every large
+        # log with integer div or mod is rejected as "native proof trimming
+        # failed". A hint without a plugin is an assumption to the trimmer.
+        log = """\
+(declare-fun x () Int)
+(define-const $1 Bool (>= x 0))
+(declare-fun arith (Bool) Proof)
+(define-const $2 Proof (arith $1))
+(infer $1 $2)
+(assume (not $1))
+(declare-fun rup () Proof)
+(infer rup)
+"""
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+            core = proof_clause_log.trim_clause_log(proof_certificate.default_z3_executable(), log)
+        commands = [line for line in core.splitlines() if line.startswith(("(assume", "(infer"))]
+        self.assertEqual(len(commands), 3)
+        self.assertIn("(arith ", core)  # the axiom keeps its hint for the replay
+        self.assertTrue(commands[-1].startswith("(infer rup "))
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmed_division_certificates_replay(self):
+        from test_proof_to_lean_lia import LIA_INPUTS
+        for name in ("lia_div", "lia_negative_divisor", "lia_div_sum"):
+            source = LIA_INPUTS[name]
+            with self.subTest(name=name):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(certificate["fragment"], "qf_lia")
+                self.assertEqual(len(certificate["assertions"]), source.count("(assert "))
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
     def test_native_trimmed_certificate_replays(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
             certificate = proof_certificate.export_clause_log_certificate(_LRA)
