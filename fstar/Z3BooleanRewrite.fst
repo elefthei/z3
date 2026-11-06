@@ -383,6 +383,49 @@ let lemma_boolean_equiv_sound (depth width:nat) (i:interpretation value)
     lemma_boolean_cut_sound boundaries depth i rho t);
   match eval i s rho, eval i t rho with VBool _, VBool _ -> () | _, _ -> ()
 
+(* Cut both sides at the Boolean nodes they share within the first `depth`
+   levels and compare the resulting skeletons. Unlike `boolean_equiv`, this
+   never expands the full Boolean height of either side, so it stays cheap when
+   z3 hash-conses a large formula into a small DAG whose tree expansion is
+   exponential (for example, rewriting `and` into `not (or (not ...))`). *)
+let shared_boolean_equiv (depth:nat) (s t:expr) : bool =
+  get_sort s = bool_sort && get_sort t = bool_sort &&
+  (let boundaries = B.unique (B.intersect (boolean_nodes depth s) (boolean_nodes depth t)) in
+   N.equivalent (boolean_cut boundaries depth s) (boolean_cut boundaries depth t))
+
+let lemma_shared_boolean_equiv_sound (depth:nat) (i:interpretation value)
+                                     (rho:env value) (s t:expr)
+  : Lemma (requires boolean_rewrite_model i /\ shared_boolean_equiv depth s t)
+          (ensures eval i s rho == eval i t rho) =
+  let boundaries = B.unique (B.intersect (boolean_nodes depth s) (boolean_nodes depth t)) in
+  let cs = boolean_cut boundaries depth s in
+  let ct = boolean_cut boundaries depth t in
+  N.lemma_equivalent_sound (valuation i rho) cs ct;
+  lemma_boolean_cut_sound boundaries depth i rho s;
+  lemma_boolean_cut_sound boundaries depth i rho t;
+  match eval i s rho, eval i t rho with VBool _, VBool _ -> () | _, _ -> ()
+
+(* Only the first, non-contextual comparison of `boolean_equiv`'s structural
+   check: normalize both full-height skeletons and compare their shapes. On
+   skeletons of hundreds of thousands of nodes this decides in well under a
+   second. A failing `boolean_equiv` retries contextual and
+   `normalize_context` variants, and the rest of the rewrite chain then takes
+   tens of seconds to minutes. *)
+let normal_boolean_equiv (s t:expr) : bool =
+  get_sort s = bool_sort && get_sort t = bool_sort &&
+  N.normal_equivalent (boolean_cut [] (boolean_height s) s)
+                      (boolean_cut [] (boolean_height t) t)
+
+let lemma_normal_boolean_equiv_sound (i:interpretation value) (rho:env value) (s t:expr)
+  : Lemma (requires boolean_rewrite_model i /\ normal_boolean_equiv s t)
+          (ensures eval i s rho == eval i t rho) =
+  let cs = boolean_cut [] (boolean_height s) s in
+  let ct = boolean_cut [] (boolean_height t) t in
+  N.lemma_normal_equivalent_sound (valuation i rho) cs ct;
+  lemma_boolean_cut_sound [] (boolean_height s) i rho s;
+  lemma_boolean_cut_sound [] (boolean_height t) i rho t;
+  match eval i s rho, eval i t rho with VBool _, VBool _ -> () | _, _ -> ()
+
 let boolean_search (s t:expr) : bool =
   get_sort s = bool_sort && get_sort t = bool_sort &&
   N.shannon 7 (N.normalize_context 2 (boolean_cut [] (boolean_height s) s))

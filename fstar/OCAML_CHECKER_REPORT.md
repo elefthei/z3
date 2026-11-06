@@ -1571,6 +1571,35 @@ semantic equality. Non-Boolean theory atoms remain opaque except for the
 proved reflexive-equality rule. Budget exhaustion means unverified, not
 equivalent; no runtime solver call or additional trust assumption is used.
 
+Because z3 hash-conses terms, a `rewrite` conclusion with a few thousand
+distinct nodes can unfold into a tree of millions of nodes, and most rewrite
+procedures walk that tree. `relational_step` therefore first tries
+`Z3BooleanRewrite.shared_boolean_equiv 3`, a skeleton comparison cut at
+depth 3 that treats subexpressions shared by both sides as opaque. Rewrites
+that this check does not justify are then handled according to the size of
+their Boolean skeletons, counted with `Z3Definitions.boolean_budget`:
+
+- **Both sides at most 20,000 nodes:** the full chain of procedures runs.
+- **Both sides at most 10^6 nodes:** only `normal_boolean_equiv` runs.
+  This is the normal-form shape comparison that `boolean_equiv`'s
+  structural check tries first, without the contextual and
+  `normalize_context` retries.
+- **Larger:** the step stays pending.
+
+The new soundness lemmas are `lemma_shared_boolean_equiv_sound` and
+`lemma_normal_boolean_equiv_sound`. Both reuse
+`lemma_boolean_cut_sound` and the normal-form lemmas.
+
+On the regression corpus, every rewrite above 20,000 skeleton nodes that
+the full chain accepts also passes the normal-form comparison. Some
+rewrites between 5,000 and 20,000 nodes need the contextual check or
+`Z3TheoryNormalize`, so they stay in the full-chain tier. The large
+rewrites that fail are coarse whole-formula `rewrite` steps produced by the
+proof-producing `ctx-simplify` tactic. One is in
+`QF_IDL/RTCL/b13_tf_10/ckt_PROP1_tf_10.smt2`, with skeletons of about
+358,000 and 337,000 nodes. Running the whole chain on it took about 260 s;
+it now fails in under a second.
+
 Boolean `ite` is exported with `op_ite` (Z3's declaration name is `if`).
 Both Boolean classifiers require three Boolean arguments and a Boolean
 result. The verified cut lowers it to `and`/`or`/`not`, reducing constant
