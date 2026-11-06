@@ -303,6 +303,75 @@ let checked_gomory_cuts () =
           (U.Holds Z3ResolutionProofTheory.false_expr) premises))
         "native Gomory metadata bypassed actual conclusion checking") cuts
 
+let checked_lattice_bounds () =
+  let module G = Z3LpGomory in
+  let fact relation lhs rhs = {
+    C.relation; contradiction = false; rhs; epsilon = Z.zero, Z.one; lhs
+  } in
+  let step rule conclusion = {
+    C.rule; conclusion; input = None; assumption = None; id = Z.zero;
+    equation = fact C.Eq [] (Z.zero, Z.one); pivot = None; definition1 = None;
+    source = None; divisor = Z.one, Z.one; premises = []; bounds = []
+  } in
+  let q n d = Z.of_int n, Z.of_int d in
+  (* T = 2x + 2y + zc*z with z fixed at 1, so T is congruent to zc modulo 2. *)
+  let run upper zc tight wrong =
+    let c = context () in
+    let t = Printf.sprintf "(+ (* 2 x) (* 2 y) (* %d z))" zc in
+    let rel = if upper then "<=" else ">=" in
+    let source = Printf.sprintf
+        "(declare-const x Int)(declare-const y Int)(declare-const z Int)\
+         (assert (= %s %s))(assert (= x x))(assert (= y y))(assert (%s %s 4))\
+         (assert (>= z 1))(assert (<= z 1))(assert (%s %s %d))(assert (%s %s %d))"
+        t t rel t rel t tight rel t wrong in
+    let inputs = parse c source in
+    let st = B.marshal_expressions (B.empty_state ()) inputs in
+    match List.map (B.cached_expression st) inputs with
+    | A.App (_, [term; _]) :: A.App (_, [x; _]) :: A.App (_, [y; _]) :: premise
+      :: (A.App (_, [z; _]) as lo) :: hi :: conclusion :: stronger :: []->
+        let variable term = { C.term; integer = true; definition = [] } in
+        let relation = if upper then C.Le else C.Ge in
+        let inputs = [
+          step C.Input (fact relation [q 1 1, Z.zero] (q 4 1));
+          step C.Input (fact C.Ge [q 1 1, Z.of_int 3] (q 1 1));
+          step C.Input (fact C.Le [q 1 1, Z.of_int 3] (q 1 1))] in
+        let lattice = { (step C.IntegerLattice (fact relation [q 1 1, Z.zero] (q tight 1))) with
+          C.pivot = Some Z.zero; divisor = q 2 1;
+          equation = fact C.Eq [q (-1) 1, Z.zero; q 2 1, Z.one; q 2 1, Z.of_int 2;
+                                q zc 1, Z.of_int 3] (q 0 1);
+          premises = [Z.zero, q 1 1; Z.one, q 1 1; Z.of_int 2, q 1 1];
+          bounds = [{ C.bound_column = Z.zero;
+                      lower = if upper then None else Some Z.zero;
+                      upper = if upper then Some Z.zero else None };
+                    { C.bound_column = Z.of_int 3; lower = Some Z.one; upper = Some (Z.of_int 2) }] } in
+        let certificate = {
+          C.variables = List.map variable [term; x; y; z]; monomials = [];
+          steps = inputs @ [lattice]; root = Z.of_int 3 } in
+        let candidate = match G.lattice_candidate certificate (Z.of_int 3) with
+          | Some value -> value | None -> failwith ("no lattice candidate: " ^ source) in
+        let facts = [Z3ResolutionProofTheory.true_expr; premise; lo; hi] in
+        require (G.check candidate conclusion facts) ("lattice bound failed: " ^ source);
+        require (not (G.check candidate stronger facts))
+          "lattice accepted a bound stronger than the fixed residue allows";
+        require (not (G.check candidate Z3ResolutionProofTheory.false_expr facts))
+          "lattice accepted a false conclusion from satisfiable bounds";
+        require (not (G.check candidate conclusion
+            [Z3ResolutionProofTheory.true_expr; premise; premise; premise]))
+          "lattice ignored the fixed-column bounds";
+        require (G.lattice_candidate { certificate with C.steps = inputs @
+            [{ lattice with C.equation = fact C.Eq [q (-2) 1, Z.zero; q 2 1, Z.one;
+                q 2 1, Z.of_int 2; q zc 1, Z.of_int 3] (q 0 1) }] } (Z.of_int 3) = None)
+          "lattice accepted a non-unit pivot row";
+        require (G.lattice_candidate { certificate with C.steps = inputs @
+            [{ lattice with C.rule = C.Gomory }] } (Z.of_int 3) = None)
+          "lattice candidate accepted a Gomory recipe"
+    | _ -> failwith "unexpected lattice fixture expressions"
+  in
+  run true 1 3 2;
+  run true (-3) 3 2;
+  run false 1 5 6;
+  run false (-3) 5 6
+
 let native_lp_certificates () =
   let assertions, proof = unsat
       "(declare-const x Int)(declare-const y Int)(declare-const z Int)\
@@ -2224,6 +2293,7 @@ let () =
      "certified-assign-bounds-parameters", native_assign_bounds;
      "checked-native-integer-LP-tightening", native_integer_tightening;
      "certified-native-Gomory-split-cuts", checked_gomory_cuts;
+     "certified-native-integer-lattice-bounds", checked_lattice_bounds;
      "certified-duplicate-distinct-rewrites", distinct_reflexivity;
      "integer-tightening-candidate-mutations", integer_tightening_candidates;
      "typed-native-LP-certificate-decoding", native_lp_certificates;

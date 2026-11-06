@@ -561,6 +561,43 @@ namespace {
         }
     }
 
+    // Integer literals enter the LP tightened: (not (>= x 0)) becomes x <= -1.
+    // Such inputs bind only when integer bounds are requested and only to the
+    // exactly tightened bound.
+    void test_integer_bound_binding() {
+        manager evidence(true);
+        evidence.register_variable(0, true);
+        auto* leaf = evidence.mk_leaf(0);
+        manager::fact bound;
+        bound.lhs.push_back({lp::mpq(1), 0});
+        bound.kind = lp::LE;
+        bound.rhs = lp::impq(lp::mpq(-1));
+        evidence.set_input_fact(leaf, bound);
+        manager::proof_expression e;
+        evidence.reconstruct(leaf, e);
+        ast_manager m(PGM_ENABLED);
+        reg_decl_plugins(m);
+        arith_util a(m);
+        expr_ref x(m.mk_const("x", a.mk_int()), m);
+        expr_ref_vector variables(m);
+        variables.push_back(x);
+        auto bind = [&](expr* fact, bool integer_bounds) {
+            proof_ref_vector premises(m), inputs(m);
+            premises.push_back(m.mk_asserted(fact));
+            VERIFY(lp::bind_evidence_inputs(m, e, variables, premises, inputs, integer_bounds));
+            return lp::mk_evidence_proof(m, e, variables, inputs);
+        };
+        expr_ref negated(m.mk_not(a.mk_ge(x, a.mk_int(0))), m);
+        VERIFY(!bind(negated, false));
+        proof_ref p = bind(negated, true);
+        VERIFY(p && proof_utils::is_closed(m, p));
+        VERIFY(lp::check_evidence_proof(m, p));
+        VERIFY(bind(a.mk_lt(x, a.mk_int(0)), true));
+        VERIFY(!bind(m.mk_not(a.mk_ge(x, a.mk_int(1))), true));
+        VERIFY(!bind(m.mk_not(a.mk_ge(x, a.mk_int(-1))), true));
+        VERIFY(!bind(m.mk_not(a.mk_le(x, a.mk_int(-1))), true));
+    }
+
     void test_native_lattice_tightening() {
         lp::lar_solver s(true);
         lp::int_solver integers(s);
@@ -1055,7 +1092,7 @@ namespace {
             return;
         auto *proof = s->get_proof();
         VERIFY(proof);
-        if (expected && symbol(expected) == symbol("lp-linear")) {
+        if (expected && (symbol(expected) == symbol("lp-linear") || symbol(expected) == symbol("lp-integer-lattice"))) {
             proof_checker checker(m);
             expr_ref_vector sides(m);
             VERIFY(checker.check(proof, sides));
@@ -1090,6 +1127,7 @@ namespace {
 
 void tst_lp_evidence() {
     test_open_export();
+    test_integer_bound_binding();
     test_annotations();
     test_erasure();
     test_shared_weights();
@@ -1114,6 +1152,11 @@ void tst_lp_evidence() {
     test_native_arithmetic("(declare-const x Real)(declare-const y Real)(declare-const z Real)"
                          "(assert (= x (* 2 y)))(assert (= y (* 3 z)))(assert (>= z 1))(assert (<= x 5))",
                          l_false, "lp-linear");
+    // These lattice conflicts use tightened bounds of negated integer literals.
+    test_native_arithmetic("(declare-const x Int)(declare-const y Int)"
+                         "(assert (and (<= 0 (- (* 28300 x) (* 24501 y))) (<= (- (* 28300 x) (* 24501 y)) 99)"
+                         "(<= 1 (- (* 28301 x) (* 24500 y))) (<= (- (* 28301 x) (* 24500 y)) 100)))",
+                         l_false, "lp-integer-lattice");
     test_native_arithmetic("(declare-const x Real)(assert (= (* x x) 2))(assert (= (* x x x) 3))",
                           l_false, "assumed", true);
     test_native_arithmetic("(declare-const x Int)(declare-const y Int)(declare-const z Int)"

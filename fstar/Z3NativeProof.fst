@@ -331,13 +331,15 @@ let rec marshal_proof_jobs (st:state) (jobs:list proof_job) : ML state =
       else if view.proof_name = "quant-inst" then
         QuantifierInstantiation (cached_expressions st view.instantiations),
         cached_premises st view.premises, st
-      else if view.proof_name = "arith/lp-gomory" then
+      else if view.proof_name = "arith/lp-gomory" || view.proof_name = "arith/lp-integer-lattice" then
         let candidate =
           match view.lp_data, view.premises with
-          | Some ("lp-gomory", [N.ParameterRational index denominator]), context :: _ ->
+          | Some (tag, [N.ParameterRational index denominator]), context :: _ ->
             if denominator = 1 && index >= 0 then
               index_get st.lp_certificates (N.ast_id context) >>= (fun certificate ->
-              Z3LpGomory.candidate certificate index)
+              if tag = "lp-gomory" then Z3LpGomory.candidate certificate index
+              else if tag = "lp-integer-lattice" then Z3LpGomory.lattice_candidate certificate index
+              else None)
             else None
           | _, _ -> None in
         let kind = match candidate with

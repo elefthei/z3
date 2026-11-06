@@ -31,11 +31,14 @@ namespace lp {
                                proof_ref_vector const& inputs);
 
     // Match native premises by their formulas; input indices may have been recycled.
+    // With integer_bounds, a negated or strict integer bound premise, such as
+    // (not (>= t c)), also matches the tightened LP input t <= c - 1.
     bool bind_evidence_inputs(ast_manager& m,
                               evidence_manager::proof_expression const& evidence,
                               expr_ref_vector const& variables,
                               proof_ref_vector const& premises,
-                              proof_ref_vector& inputs);
+                              proof_ref_vector& inputs,
+                              bool integer_bounds = false);
 
     bool is_evidence_proof(proof const* p);
     bool check_evidence_proof(ast_manager& m, proof* p);

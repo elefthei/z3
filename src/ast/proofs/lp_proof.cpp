@@ -308,6 +308,41 @@ namespace lp {
             return m.is_true(eq);
         }
 
+        // Integer bounds are kept tight in the LP: an asserted literal
+        // (not (<= t c)) over Int is stored as t >= floor(c) + 1, and
+        // (not (>= t c)) as t <= ceil(c) - 1 (likewise for strict atoms).
+        // Return that integer-equivalent bound, or null if none applies.
+        expr_ref integer_bound(ast_manager& m, expr* e) {
+            arith_util a(m);
+            expr *x = nullptr, *t = nullptr, *c = nullptr;
+            rational r;
+            bool negated = m.is_not(e, x);
+            if (!negated)
+                x = e;
+            if (!is_app(x) || to_app(x)->get_num_args() != 2)
+                return expr_ref(m);
+            t = to_app(x)->get_arg(0);
+            c = to_app(x)->get_arg(1);
+            if (!a.is_int(t) || !a.is_numeral(c, r))
+                return expr_ref(m);
+            if (negated ? a.is_le(x) : a.is_gt(x))
+                return expr_ref(a.mk_ge(t, a.mk_int(floor(r) + 1)), m);
+            if (negated ? a.is_ge(x) : a.is_lt(x))
+                return expr_ref(a.mk_le(t, a.mk_int(ceil(r) - 1)), m);
+            return expr_ref(m);
+        }
+
+        // An LP input fact matches a native premise if both are equivalent
+        // after rewriting, or the premise is an integer bound that the LP
+        // tightened. Consumers justify the latter through integer Farkas
+        // reasoning on the lp-input step.
+        bool input_matches(ast_manager& m, expr* premise, expr* input) {
+            if (equivalent(m, premise, input))
+                return true;
+            expr_ref bound = integer_bound(m, premise);
+            return bound && equivalent(m, bound, input);
+        }
+
         bool check_bindings(ast_manager& m, manager::proof_expression const& e, expr_ref_vector const& variables) {
             arith_util a(m);
             for (unsigned i = 0; i < variables.size(); ++i) {
@@ -424,7 +459,7 @@ namespace lp {
             if (m.get_num_parents(p) == 1)
                 return equivalent(m, conclusion, m.mk_true());
             return m.get_num_parents(p) == 2 &&
-                equivalent(m, m.get_fact(m.get_parent(p, 1)), conclusion);
+                input_matches(m, m.get_fact(m.get_parent(p, 1)), conclusion);
         }
         if (s.kind == rule::discharge) {
             if (m.get_num_parents(p) != 2)
@@ -449,7 +484,7 @@ namespace lp {
 
     bool bind_evidence_inputs(ast_manager& m, manager::proof_expression const& e,
                               expr_ref_vector const& variables, proof_ref_vector const& premises,
-                              proof_ref_vector& inputs) {
+                              proof_ref_vector& inputs, bool integer_bounds) {
         if (variables.size() != e.variables.size() || !e.check())
             return false;
         inputs.reset();
@@ -458,7 +493,8 @@ namespace lp {
             if (s.kind == rule::input) {
                 expr_ref f = evidence_fact(m, s.conclusion, variables);
                 for (auto* premise : premises)
-                    if (equivalent(m, f, m.get_fact(premise))) {
+                    if (integer_bounds ? input_matches(m, m.get_fact(premise), f)
+                                       : equivalent(m, f, m.get_fact(premise))) {
                         input = premise;
                         break;
                     }
@@ -487,7 +523,7 @@ namespace lp {
             parents.push_back(context);
             if (s.kind == rule::input) {
                 if (inputs[i]) {
-                    if (!equivalent(m, m.get_fact(inputs[i]), conclusion))
+                    if (!input_matches(m, m.get_fact(inputs[i]), conclusion))
                         return result;
                     parents.push_back(inputs[i]);
                 }
