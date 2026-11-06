@@ -576,6 +576,28 @@ def equality_diamond(levels):
     return "\n".join(lines) + "\n"
 
 
+def wide_uf_instance(shape, width):
+    """Unsat QF_UF input whose refutation needs one formula with `width` operands.
+
+    "or": an input disjunction of `width` equalities, each refuted by a unit;
+    "chain": a `width`-ary conjunction a0 = a1 = ... chained into one euf lemma;
+    "split": a `width`-ary conjunction of clauses that the clause log ties to
+    the assertion through one cnf lemma over the whole conjunction.
+    """
+    declarations = "(set-logic QF_UF)(declare-sort U 0)(declare-fun f (U) U)(declare-fun b () U)(declare-fun c () U)"
+    declarations += "".join("(declare-fun a%d () U)" % i for i in range(width + 1))
+    if shape == "or":
+        body = "(assert (or %s))" % " ".join("(= (f a%d) b)" % i for i in range(width))
+        body += "".join("(assert (not (= (f a%d) b)))" % i for i in range(width))
+    elif shape == "chain":
+        body = "(assert (and %s))" % " ".join("(= a%d a%d)" % (i, i + 1) for i in range(width))
+        body += "(assert (not (= (f a0) (f a%d))))" % width
+    else:
+        body = "(assert (and %s))" % " ".join("(or (= a%d b) (= a%d c))" % (i, i) for i in range(width))
+        body += "(assert (not (= b c)))(assert (= (f a0) a1))(assert (not (= a0 b)))(assert (not (= a0 c)))"
+    return declarations + body + "(check-sat)\n"
+
+
 def outlined_lemma_sizes(text):
     """Proof steps defined inside each outlined lemma (bindings of other lemmas carry no type)."""
     return [len(re.findall(r"^  let _step_\d+ (?!:=)", block, re.MULTILINE))
@@ -1527,6 +1549,26 @@ class TestUninterpretedLeanIntegration(unittest.TestCase):
                 self.assertIn("th-lemma", certificate["rule_counts"])
                 # grind's congruence closure proofs use the classical axioms Lean core relies on.
                 self.assertIn(".unsat' depends on axioms: " + _STANDARD_AXIOMS, report)
+
+    def test_wide_formulas_verify(self):
+        # Formulas with a few hundred operands below the outlining threshold:
+        # a 300-literal input clause (Lean rejects its definition with
+        # "maximum recursion depth has been reached"), and an euf lemma and a
+        # cnf lemma over 170-operand conjunctions (grind fails on them with the
+        # same issue). SMT-LIB QF_UF NEQ004_size4 needs both.
+        for shape, width, lemmas in [("or", 300, set()), ("chain", 170, {"euf"}), ("split", 170, {"cnf"})]:
+            source = wide_uf_instance(shape, width)
+            with self.subTest(shape=shape):
+                certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual({d["parameters"][0] for d in certificate["declarations"]
+                                  if d["name"] == "th-lemma"}, lemmas)
+                steps = sum(1 for node in certificate["nodes"]
+                            if certificate["declarations"][node["declaration"]]["range"] == "Proof")
+                self.assertLessEqual(steps, proof_to_lean._OUTLINE_PROOF_STEPS)
+                _, report = self.check(source)
+                # Without a theory lemma the refutation needs no classical axioms.
+                self.assertIn(".unsat' depends on axioms: " + _STANDARD_AXIOMS if lemmas
+                              else ".unsat' does not depend on any axioms", report)
 
     def test_negated_ite_conditions_verify(self):
         for depth in (1, 2, 3, 4):

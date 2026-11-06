@@ -1235,6 +1235,25 @@ class TestProofToLeanIntegration(unittest.TestCase):
         closing = text.rstrip().splitlines()[-3]  # the main theorem's body, before "end"
         self.assertRegex(closing, r"^  proof_step_%d _atoms \(And\.intro .*\)( _df?\d+)+$" % certificate["proof"])
 
+    def test_wide_input_clause_is_checked_without_axioms(self):
+        # One 300-literal input clause refuted by 300 unit assertions. The
+        # clause stays below the outlining threshold, so only its width is
+        # exercised; Lean currently rejects the clause's own definition with
+        # "maximum recursion depth has been reached".
+        width = 300
+        source = "".join("(declare-const p%d Bool)" % i for i in range(width))
+        source += "(assert (or %s))" % " ".join("p%d" % i for i in range(width))
+        source += "".join("(assert (not p%d))" % i for i in range(width))
+        for core, export in [("legacy", proof_certificate.export_certificate),
+                             ("clause-log", proof_certificate.export_clause_log_certificate)]:
+            with self.subTest(core=core):
+                certificate = export(source)
+                steps = sum(1 for node in certificate["nodes"]
+                            if certificate["declarations"][node["declaration"]]["range"] == "Proof")
+                self.assertLessEqual(steps, proof_to_lean._OUTLINE_PROOF_STEPS)
+                text = self.check(source, certificate)
+                self.assertNotIn("Classical", text)
+
 
 if __name__ == "__main__":
     unittest.main()
