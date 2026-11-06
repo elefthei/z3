@@ -235,6 +235,44 @@ class TestProofCertificate(unittest.TestCase):
         self.assertGreater(len(certificate["nodes"]), depth)
         self.assert_well_formed(certificate)
 
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for the clause log")
+    def test_clause_log_deep_assertions_do_not_require_python_recursion(self):
+        # The clause log is the default for every non-propositional input; it
+        # must handle the deep nesting the legacy exporter handles above.
+        # SMT-LIB QF_IDL FISCHER6-4-ninc, PO4-10-PO4 and OOO_neg.3steps are one
+        # right-nested binary and of depth 2,000 to 42,000.
+        depth = 1200
+        declarations = "(declare-const x Real)" + "".join("(declare-const y%d Real)" % i for i in range(depth))
+        conjunction = "(< x 0.0)"
+        disjunction = "(< x 0.0)"
+        for i in reversed(range(depth)):
+            conjunction = "(and (>= y%d 0.0) %s)" % (i, conjunction)
+        for i in reversed(range(depth // 2)):
+            disjunction = "(or (< y%d 0.0) %s)" % (i, disjunction)
+        inputs = {
+            # and-elim paths through every level of the conjunction
+            "conjunction": (declarations + "(assert (> x 1.0))(assert %s)" % conjunction, 2),
+            # the matching key of the disjunction is computed through every level
+            "disjunction": (declarations + "".join("(assert (>= y%d 0.0))" % i for i in range(depth // 2))
+                            + "(assert (> x 1.0))(assert %s)" % disjunction, depth // 2 + 2),
+            # an odd chain of negations around one atom
+            "negations": ("(declare-const x Real)(declare-const y Real)(assert (or (<= y 0.0) "
+                          + "(not " * (depth + 1) + "(>= x 0.0)" + ")" * (depth + 1)
+                          + "))(assert (> y 1.0))(assert (>= x 1.0))", 3),
+        }
+        limit = sys.getrecursionlimit()
+        for name, (source, count) in inputs.items():
+            with self.subTest(shape=name):
+                certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(certificate["fragment"], "qf_lra")
+                self.assertEqual(len(certificate["assertions"]), count)
+                nodes = certificate["nodes"]
+                for index, node in enumerate(nodes):
+                    self.assertTrue(all(0 <= argument < index for argument in node["arguments"]))
+                root = nodes[certificate["proof"]]
+                self.assertEqual(certificate["declarations"][root["declaration"]]["range"], "Proof")
+                self.assertEqual(sys.getrecursionlimit(), limit)
+
     def test_named_assertions_do_not_introduce_tracking_assumptions(self):
         source = """\
 (declare-const p Bool)
