@@ -607,6 +607,22 @@ the 6-level one drops from 15 s to 2 s, and pigeonhole-5 checks in 3 s;
 pigeonhole-6 (8,693 steps, 3,071 lemmas) checks in about 90 s. Covered by
 `test_proof_to_lean_uf.py` and `test_proof_to_lean_integration.py`.
 
+**Wide formulas below the outline threshold (2026-11-06).** Only the
+outlined lemmas and `theorem unsat` raised `maxRecDepth`. An
+n-ary `or`/`and` is one nested `Or`/`And` in its `def formula_N`, and the
+`grind` lemmas over it unfold that term, so a few hundred operands exceeded
+Lean's default limit (512) in short proofs too. A 300-literal clause failed on
+its definition, and euf and cnf lemmas over 170 operands failed inside
+`grind`. The generated namespace now sets `maxRecDepth 100000` once for every
+declaration. This is a resource limit; heartbeats and the trust settings are
+unchanged. QF_UF `NEQ/NEQ004_size4` (which also needs the trimmed-log
+`declare-sort` fix) now checks in about 90 s. Still open: a Farkas lemma over
+a cycle of 200 or more inequalities passes the depth limit but is slow in
+`grind` (about 80 s at 200). Tests: `test_proof_to_lean_integration.py`
+(`test_wide_input_clause_is_checked_without_axioms`, both cores) and
+`test_proof_to_lean_uf.py` (`test_wide_formulas_verify`: `or`, euf chain, cnf
+split).
+
 **`ite` over the uninterpreted sort (2026-10-12).** The QF_UF slice rejected
 every input with an `ite` whose branches have the uninterpreted sort, although
 the clause log treats it exactly like a Real `ite`: the `euf` core keeps the

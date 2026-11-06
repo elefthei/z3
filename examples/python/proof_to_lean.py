@@ -2677,7 +2677,11 @@ def reconstruct(source, certificate):
         lines.append("-- No uninterpreted sort: the type _U carries only the Boolean arguments of the predicates.")
     if any(decl.kind == z3.Z3_OP_UNINTERPRETED and "Bool" in decl.domain for decl in graph.declarations):
         lines.append("-- Boolean arguments of functions and predicates are injected into _U by _bool.")
-    lines.extend(["namespace " + namespace, ""])
+    # A clause or conjunction of a few hundred operands is one nested term, in
+    # its definition and in the grind lemmas over it; Lean's default recursion
+    # limit (512) rejects it. Raise it for the whole namespace. This is a
+    # resource limit, not a trust setting.
+    lines.extend(["namespace " + namespace, "", "set_option maxRecDepth 100000", ""])
     signature = "(_atoms : Nat -> Prop)" + _valuation_binder(graph)
     classical = set()  # Term nodes containing an ite or abs: their classical instance is noncomputable.
     for node in range(len(graph.nodes)):
