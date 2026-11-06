@@ -1193,6 +1193,22 @@ negations are covered too. Tests: `test_proof_certificate.py`
 `test_proof_to_lean_uf.py` (`UF_NEGATED_ITE_CONDITION`, both cores,
 nested negations, and rejection of a gate with its guard reversed).
 
+**Trimmed clause logs over uninterpreted sorts (2026-11-05).** Clause logs of
+at least 1,000,000 characters go through native trimming
+(`solver.proof.trim=true`) and `proof_clause_log._dependency_core` before the
+replay. The trimmer echoes a `(declare-sort S 0)` before the first use of each
+uninterpreted sort, which the dependency core rejected ("unsupported
+trimmed-log command: declare-sort"), so 14 of the 23 QF_UF files in z3test's
+smtlib-sample never reached the replay. The core now keeps sort declarations
+in their original order next to `declare-fun`; the replay still validates
+each one (arity 0, sort present in the input). `qg7_iso_brn043` is now
+Lean-checked end to end. Open: the other QG-classification `gensys` files and
+`NEQ004_size4` reach Lean and hit heartbeat and `maxRecDepth` limits, and
+`sokoban.3` is rejected on the fresh sort `distinct-elems!0` of the large
+`distinct` encoding. Tests: `test_proof_certificate.py`
+(`_UF_TWO_SORTS_TRIMMED_LOG`, order, validation, native trimming) and
+`test_proof_to_lean_uf.py` (`test_native_dependency_core_is_checked_in_lean`).
+
 ## Arithmetic proof infrastructure
 
 ### Native implied-equality conclusions (2026-10-19)
