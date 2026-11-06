@@ -1528,6 +1528,19 @@ class TestUninterpretedLeanIntegration(unittest.TestCase):
                 # grind's congruence closure proofs use the classical axioms Lean core relies on.
                 self.assertIn(".unsat' depends on axioms: " + _STANDARD_AXIOMS, report)
 
+    def test_native_dependency_core_is_checked_in_lean(self):
+        # QF_UF inputs whose clause log exceeds the trimming threshold (most
+        # SMT-LIB QF_UF samples) take the native trimming path, whose output
+        # declares the uninterpreted sorts; the trimmed core must be certified
+        # exactly like the full log, with every original assertion kept.
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+            for name, source in UF_INPUTS.items():
+                with self.subTest(name=name):
+                    certificate, report = self.check(source)
+                    self.assertIn("th-lemma", certificate["rule_counts"])
+                    self.assertEqual(len(certificate["assertions"]), source.count("(assert "))
+                    self.assertIn(".unsat' depends on axioms: " + _STANDARD_AXIOMS, report)
+
     def test_negated_ite_conditions_verify(self):
         for depth in (1, 2, 3, 4):
             condition = "(not " * depth + "q" + ")" * depth

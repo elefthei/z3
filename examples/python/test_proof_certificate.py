@@ -2520,6 +2520,76 @@ _DEPENDENCY_LOG = """\
 """
 
 
+# What `z3 solver.proof.trim=true` prints for the clause log of _UF_TWO_SORTS
+# (captured from the native trimmer): it echoes a (declare-sort ...) for each
+# uninterpreted sort before the first declaration that uses it.  Every QF_UF
+# input whose clause log exceeds _TRIM_THRESHOLD reaches _dependency_core with
+# such commands.
+_UF_TWO_SORTS_TRIMMED_LOG = """\
+(declare-sort B 0)
+(declare-sort A 0)
+(declare-fun b () B)
+(declare-fun f (A) B)
+(declare-fun a1 () A)
+(declare-fun deps (Int) Proof)
+(define-const $23 B (f a1))
+(define-const $25 Bool (= $23 b))
+(define-const $55 Proof (deps 0))
+(assume $25 $55)
+(declare-fun q () Bool)
+(declare-fun a2 () A)
+(define-const $27 B (f a2))
+(define-const $28 Bool (= $27 b))
+(define-const $57 Proof (deps 1))
+(assume q $28 $57)
+(define-const $59 Proof (deps 2))
+(assume (not q) $59)
+(declare-fun p (B) Bool)
+(declare-fun g (B A) A)
+(define-const $31 Bool (= $23 $27))
+(define-const $32 A (g b a1))
+(define-const $33 B (f $32))
+(define-const $34 Bool (p $33))
+(define-const $61 Proof (deps 3))
+(assume (not $31) $34 $61)
+(define-const $36 A (g $23 a1))
+(define-const $37 B (f $36))
+(define-const $38 Bool (p $37))
+(define-const $63 Proof (deps 4))
+(assume (not $38) $63)
+(declare-fun rup () Proof)
+(declare-fun deps (Int Int Int) Proof)
+(define-const $65 Proof (deps 5 2 1))
+(infer $28 rup $65)
+(declare-fun euf (Bool Bool Bool Proof) Proof)
+(declare-fun comm (Bool) Proof)
+(define-const $41 Bool (= $31 $28))
+(define-const $42 Proof (comm $41))
+(define-const $35 Bool (not $31))
+(define-const $43 Proof (euf $35 $25 $28 $42))
+(define-const $67 Proof (deps 6))
+(infer (not $25) (not $28) $31 $43 $67)
+(declare-fun deps (Int Int Int Int Int Int) Proof)
+(define-const $69 Proof (deps 7 6 1 5 2 0))
+(infer $31 rup $69)
+(declare-fun euf (Bool Bool Bool Proof Proof Proof) Proof)
+(declare-fun cc (Bool) Proof)
+(define-const $46 Bool (= $34 $38))
+(define-const $47 Proof (cc $46))
+(define-const $48 Bool (= $37 $33))
+(define-const $49 Proof (cc $48))
+(define-const $50 Bool (= $32 $36))
+(define-const $51 Proof (cc $50))
+(define-const $39 Bool (not $38))
+(define-const $52 Proof (euf $34 $25 $39 $51 $49 $47))
+(define-const $71 Proof (deps 8))
+(infer (not $25) $38 (not $34) $52 $71)
+(declare-fun deps (Int Int Int Int Int Int Int Int Int Int) Proof)
+(define-const $73 Proof (deps 10 8 3 7 6 0 5 1 2 4))
+(infer rup $73)
+"""
+
+
 class TestClauseLogDependencies(unittest.TestCase):
     def test_dependency_core_orders_forward_references_and_keeps_assertion_roots(self):
         core = proof_clause_log._dependency_core(_DEPENDENCY_LOG)
@@ -2580,6 +2650,57 @@ class TestClauseLogDependencies(unittest.TestCase):
             certificate = proof_certificate.export_clause_log_certificate(_LRA)
         self.assertEqual(certificate["fragment"], "qf_lra")
         self.assertEqual(len(certificate["assertions"]), 4)
+
+
+    def test_dependency_core_keeps_sort_declarations_in_order(self):
+        # The trimmed log of an input over uninterpreted sorts declares each
+        # sort before the functions over it; the core must keep those
+        # declarations, in their original order, for the replay to resolve them.
+        core = proof_clause_log._dependency_core(_UF_TWO_SORTS_TRIMMED_LOG)
+        lines = core.splitlines()
+        self.assertEqual(lines[:2], ["(declare-sort B 0)", "(declare-sort A 0)"])
+        self.assertLess(lines.index("(declare-sort A 0)"), lines.index("(declare-fun f (A) B)"))
+        self.assertLess(lines.index("(declare-sort B 0)"), lines.index("(declare-fun b () B)"))
+        self.assertEqual(lines[-1], "(infer rup $73)")
+        context = z3.Context()
+        assertions, fragment = proof_certificate.parse_assertions(_UF_TWO_SORTS, context)
+        certificate = proof_clause_log.build_certificate(_UF_TWO_SORTS, fragment, assertions, core, context)
+        self.assertEqual(certificate["fragment"], "qf_uf")
+        self.assertEqual(len(certificate["assertions"]), 5)
+        self.assertEqual({d["range"] for d in certificate["declarations"]}, {"Bool", "A", "B", "Proof"})
+        self.assertIn("th-lemma", certificate["rule_counts"])
+
+    def test_trimmed_sort_declarations_are_validated_not_dropped(self):
+        # Keeping the sort declarations must not bypass the replay's checks
+        # on them, and other declaration commands stay unsupported.
+        for log, message in [
+            (_UF_TWO_SORTS_TRIMMED_LOG.replace("(declare-sort A 0)", "(declare-sort C 0)"),
+             "sort absent from the input"),
+            (_UF_TWO_SORTS_TRIMMED_LOG.replace("(declare-sort A 0)", "(declare-sort A 1)"),
+             "malformed sort declaration"),
+        ]:
+            with self.subTest(message=message):
+                core = proof_clause_log._dependency_core(log)
+                context = z3.Context()
+                assertions, fragment = proof_certificate.parse_assertions(_UF_TWO_SORTS, context)
+                with self.assertRaisesRegex(proof_certificate.ProofExportError, message):
+                    proof_clause_log.build_certificate(_UF_TWO_SORTS, fragment, assertions, core, context)
+        datatype = _UF_TWO_SORTS_TRIMMED_LOG.replace(
+            "(declare-sort A 0)", "(declare-sort A 0)\n(declare-datatype D ((d)))")
+        with self.assertRaisesRegex(proof_certificate.ProofExportError, "unsupported trimmed-log command"):
+            proof_clause_log._dependency_core(datatype)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmed_uninterpreted_sort_certificates_replay(self):
+        # Large QF_UF logs (most of the SMT-LIB QF_UF samples) are trimmed
+        # natively; the trimmed core must replay like the untrimmed log.
+        for name, source, count in [("one sort", _UF, 3), ("two sorts", _UF_TWO_SORTS, 5)]:
+            with self.subTest(input=name):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+                    certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(certificate["fragment"], "qf_uf")
+                self.assertEqual(len(certificate["assertions"]), count)
+                self.assertIn("th-lemma", certificate["rule_counts"])
 
 
 if __name__ == "__main__":
