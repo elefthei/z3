@@ -173,7 +173,9 @@ def trim_clause_log(z3_executable, text, timeout=None):
         except OSError as error:
             raise ProofExportError("cannot run native proof trimming: %s" % error) from error
         if run.returncode or "(error" in run.stdout:
-            raise ProofExportError("native proof trimming failed: %s" % (run.stderr + run.stdout)[-2000:])
+            status = "signal %d" % -run.returncode if run.returncode < 0 else "exit status %d" % run.returncode
+            raise ProofExportError("native proof trimming failed (%s): %s"
+                                   % (status, (run.stderr + run.stdout)[-2000:]))
         if run.stderr.strip():
             warnings.warn("native proof trimming diagnostics:\n" + run.stderr[-2000:], RuntimeWarning)
         return _dependency_core(run.stdout)

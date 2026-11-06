@@ -332,10 +332,14 @@ namespace euf {
         return m_map.find(a->get_decl()->get_name(), p) && p->check(a);
     }
 
+    bool theory_checker::has_plugin(expr* e) const {
+        return e && is_app(e) && m_map.contains(to_app(e)->get_name());
+    }
+
     expr_ref_vector theory_checker::clause(expr* e) {
-        SASSERT(is_app(e) && m_map.contains(to_app(e)->get_name()));
-        expr_ref_vector r = m_map[to_app(e)->get_name()]->clause(to_app(e));
-        return r;
+        if (!has_plugin(e))
+            return expr_ref_vector(m);
+        return m_map[to_app(e)->get_name()]->clause(to_app(e));
     }
 
     bool theory_checker::vc(expr* e, expr_ref_vector const& clause, expr_ref_vector& v) {

@@ -19,6 +19,8 @@ Abstract:
 #include "parsers/smt2/smt2parser.h"
 #include "sat/sat_proof_trim.h"
 #include "sat/smt/arith_theory_checker.h"
+#include "sat/smt/euf_proof_checker.h"
+#include "util/gparams.h"
 #include <iostream>
 #include <sstream>
 
@@ -389,8 +391,47 @@ static void tst_trim_satisfied_clause() {
     ENSURE(core[2].first == 5);
 }
 
+// The arith solver logs its own div/mod axioms under the hint arith, which
+// no checker plugin claims. The trimmer must keep such a clause as logged
+// instead of asking the checker for it, which used to crash.
+static void tst_trim_hint_without_plugin() {
+    {
+        ast_manager m;
+        reg_decl_plugins(m);
+        euf::theory_checker checker(m);
+        expr_ref p(m.mk_const(symbol("p"), m.mk_bool_sort()), m);
+        expr* args[1] = { p };
+        expr_ref arith(m.mk_app(symbol("arith"), 1, args, m.mk_proof_sort()), m);
+        expr_ref euf(m.mk_app(symbol("euf"), 1, args, m.mk_proof_sort()), m);
+        ENSURE(!checker.has_plugin(arith));
+        ENSURE(checker.has_plugin(euf));
+        ENSURE(checker.clause(arith).empty());
+        ENSURE(!checker.check(arith));
+    }
+    for (char const* hint : { "arith", "unchecked-hint" }) {
+        std::string name(hint);
+        std::string log =
+            "(declare-fun p () Bool)\n"
+            "(declare-fun q () Bool)\n"
+            "(declare-fun " + name + " (Bool) Proof)\n"
+            "(infer q (" + name + " q))\n"
+            "(infer p (" + name + " p))\n"
+            "(assume (not p))\n"
+            "(declare-fun rup () Proof)\n"
+            "(infer rup)\n";
+        gparams::set("solver.proof.trim", "true");
+        std::string out = replay(log.c_str());
+        gparams::set("solver.proof.trim", "false");
+        std::cout << out;
+        ENSURE(out.find("(" + name + " p)") != std::string::npos);
+        ENSURE(out.find("(" + name + " q)") == std::string::npos);
+        ENSURE(out.find("(infer rup") != std::string::npos);
+    }
+}
+
 void tst_proof_replay() {
     tst_trim_satisfied_clause();
+    tst_trim_hint_without_plugin();
     tst_is_extended_numeral();
     tst_checker_nary_mul();
     tst_checker_printed_numerals();

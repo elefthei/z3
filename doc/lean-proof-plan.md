@@ -1193,6 +1193,25 @@ negations are covered too. Tests: `test_proof_certificate.py`
 `test_proof_to_lean_uf.py` (`UF_NEGATED_ITE_CONDITION`, both cores,
 nested negations, and rejection of a gate with its guard reversed).
 
+**Native trimming of theory axioms without a checker (2026-11-05).** The
+sat.smt arithmetic solver logs its own `div`/`mod` axioms and Real division
+axioms under the hint `arith`, which no `euf::theory_checker` plugin claims.
+`proof_trim::infer` asked the checker for every non-`rup` hint's clause, and
+`theory_checker::clause` dereferenced the missing plugin. As a result,
+`solver.proof.trim=true` segfaulted, and every clause log of at least 1 MB
+with such an axiom failed to export with an empty message. The trimmer now
+keeps a hint without a plugin as an assumption of its logged clause.
+`theory_checker::clause` returns an empty clause for an unknown hint, and the
+new `theory_checker::has_plugin` lets callers check for a plugin first. `arith`
+is still not a checked rule; the exporter replays the axiom, and Lean proves
+it. `trim_clause_log` reports the trimmer's exit status or signal. The
+level-0 empty clause that the trimmer lists as its own dependency is still
+open; it is rejected as cyclic (`lia_mod_sum`, `uflra_division_axiom`). Tests:
+`src/test/proof_replay.cpp` (`tst_trim_hint_without_plugin`),
+`test_proof_certificate.py` (`TestNativeTrimmingOfTheoryAxioms`),
+`test_proof_to_lean_lia.py` (`many_division_axioms(1000)`, a 1.27 MB log),
+and `test_proof_to_lean_uflia.py`.
+
 ## Arithmetic proof infrastructure
 
 ### Native implied-equality conclusions (2026-10-19)
