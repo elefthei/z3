@@ -16,6 +16,7 @@ Abstract:
 #include "ast/reg_decl_plugins.h"
 #include "cmd_context/cmd_context.h"
 #include "cmd_context/extra_cmds/proof_cmds.h"
+#include "util/gparams.h"
 #include "parsers/smt2/smt2parser.h"
 #include "sat/sat_proof_trim.h"
 #include "sat/smt/arith_theory_checker.h"
@@ -364,6 +365,30 @@ static void tst_is_extended_numeral() {
     ENSURE(checker.check(mk_arith_hint(m, "farkas", ints(m, {1, 1}), lits)));
 }
 
+// The arithmetic solver labels its own axioms (div and mod definitions)
+// arith, a rule without a checker plugin. Trimming must keep such a clause as
+// an assumption with its hint instead of asking the checker for its clause.
+static char const* arith_axiom_log =
+    "(declare-fun x () Int)\n"
+    "(define-const $1 Bool (>= x 0))\n"
+    "(declare-fun arith (Bool) Proof)\n"
+    "(define-const $2 Proof (arith $1))\n"
+    "(infer $1 $2)\n"
+    "(assume (not $1))\n"
+    "(declare-fun rup () Proof)\n"
+    "(infer rup)\n";
+
+static void tst_trim_hint_without_checker() {
+    gparams::set("solver.proof.trim", "true");
+    std::string out = replay(arith_axiom_log);
+    gparams::set("solver.proof.trim", "false");
+    std::cout << out;
+    ENSURE(out.find("(arith ") != std::string::npos);
+    ENSURE(out.find("(infer $") != std::string::npos);
+    ENSURE(out.find("(assume (not ") != std::string::npos);
+    ENSURE(out.find("(infer rup ") != std::string::npos);
+}
+
 static void tst_trim_satisfied_clause() {
     params_ref params;
     reslimit limit;
@@ -391,6 +416,7 @@ static void tst_trim_satisfied_clause() {
 
 void tst_proof_replay() {
     tst_trim_satisfied_clause();
+    tst_trim_hint_without_checker();
     tst_is_extended_numeral();
     tst_checker_nary_mul();
     tst_checker_printed_numerals();

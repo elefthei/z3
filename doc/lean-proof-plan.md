@@ -1028,6 +1028,30 @@ Real `div` declaration, a swapped operator in the input, and a false
 the divisor), `rem`, `to_real`/`to_int`, and the legacy core's integer
 steps.
 
+**Trimming logs with `arith` axiom hints (2026-11-06).** Clause logs of at
+least 1 MB are trimmed natively (`solver.proof.trim=true`) before the replay.
+The trimmer asked `euf::theory_checker` for the clause behind every non-rup
+hint. `arith`, which labels the arithmetic solver's own `div`/`mod` axioms
+above, has no checker plugin, and `theory_checker::clause` indexed the
+missing entry, so the trimmer crashed with SIGSEGV. As a result, no large
+integer input with `div` or `mod` reached the replay. The trimmer now asks
+only for rules with a plugin (`theory_checker::has_plugin`). Any other
+hinted clause is kept as an assumption with its hint, which the replay then
+shape-checks and Lean proves as before. `theory_checker::clause` returns no
+clause for an unknown rule instead of crashing. Trimming is not a trust
+step: the replay re-checks every retained step.
+
+With trimming forced, `lia_div`, `lia_negative_divisor`, and `lia_div_sum`
+now trim, replay, and check in Lean. Of 31 unsat random division instances,
+16 export. Two trimmer defects remain open: 14 instances fail with a final
+empty clause that depends on itself ("cyclic clause dependencies"), and 1
+crashes in `sat::proof_trim::add_core`, as the QF_IDL
+`DTP_k2_n35_c245_s9` log does. Tests:
+- `test_proof_certificate.py`: `test_native_trimming_accepts_hints_without_a_checker_plugin`
+  and `test_native_trimmed_division_certificates_replay`;
+- `test_proof_to_lean_lia.py`: `test_native_trimmed_division_cores_are_checked_in_lean`;
+- native: `test-z3 proof_replay` (`tst_trim_hint_without_checker`).
+
 **Harmless front matter is ignored instead of rejected (2026-10-15).** The
 exporter accepted `(set-option :produce-proofs true)` and nothing else, and
 only `check-sat`, `get-proof`, and `exit` as queries, so z3test regressions

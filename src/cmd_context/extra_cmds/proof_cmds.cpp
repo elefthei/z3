@@ -121,13 +121,16 @@ public:
      * theory axiom is possible even if there are no checkers.
      * In this case, the proof_checker::check dependency should not
      * be used.
+     * A hint without a checker plugin (such as the arithmetic solver's
+     * own axioms, labeled arith) has no clause to retrieve: its clause is
+     * an assumption as logged, and the hint is kept for external checkers.
      */
     
     void infer(expr_ref_vector const& clause, app* hint) {
         if (m_empty)
             return;
 
-        if (hint && !is_rup(hint)) {
+        if (hint && !is_rup(hint) && m_checker.has_plugin(hint)) {
             auto clause1 = m_checker.clause(hint);
             if (clause1.size() != clause.size()) {
                 mk_clause(clause1);
