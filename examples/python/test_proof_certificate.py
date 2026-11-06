@@ -2582,5 +2582,113 @@ class TestClauseLogDependencies(unittest.TestCase):
         self.assertEqual(len(certificate["assertions"]), 4)
 
 
+# The sat.smt clause log of _MOD_AXIOM, verbatim. The arithmetic solver states
+# its mod/div definitions as clauses under the hint `arith` (the solver's
+# name, recorded by th_euf_solver::add_clause), for which Z3's proof checker
+# registers no plugin; the trimmer looked one up anyway and crashed.
+_MOD_AXIOM = """\
+(declare-const x Int)
+(declare-const y Int)
+(assert (= y (mod x 3)))
+(assert (< y 0))
+(check-sat)
+"""
+
+_MOD_AXIOM_LOG = """\
+(declare-fun x () Int)
+(define-const $8 Int (mod x 3))
+(define-const $17 Int (div x 3))
+(define-const $18 Int (* 3 $17))
+(define-const $19 Int (+ $18 $8))
+(define-const $21 Bool (= $19 x))
+(declare-fun arith (Bool) Proof)
+(define-const $23 Bool (not $21))
+(define-const $24 Proof (arith $23))
+(infer $21 $24)
+(define-const $20 Bool (>= $8 0))
+(define-const $25 Bool (not $20))
+(define-const $26 Proof (arith $25))
+(infer $20 $26)
+(define-const $27 Bool (<= $8 2))
+(define-const $28 Bool (not $27))
+(define-const $29 Proof (arith $28))
+(infer $27 $29)
+(declare-fun y () Int)
+(define-const $9 Bool (= y $8))
+(assume $9)
+(define-const $12 Bool (<= 0 y))
+(assume (not $12))
+(declare-fun farkas (Int Bool Int Bool Int Bool) Proof)
+(define-const $13 Bool (not $12))
+(define-const $30 Proof (farkas 1 $9 1 $20 1 $13))
+(infer (not $20) $12 (not $9) $30)
+(declare-fun euf (Bool Bool) Proof)
+(define-const $31 Bool (not $9))
+(define-const $32 Proof (euf $31 $9))
+(infer (not $9) $9 $32)
+(declare-fun rup () Proof)
+(infer rup)
+"""
+
+
+class TestNativeTrimmingOfTheoryAxioms(unittest.TestCase):
+    def trim(self, log):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.smt2"
+            path.write_text(log, encoding="utf-8")
+            return subprocess.run([proof_certificate.default_z3_executable(), "-smt2",
+                                   "solver.proof.trim=true", str(path)], capture_output=True, text=True)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmer_keeps_arith_axioms(self):
+        run = self.trim(_MOD_AXIOM_LOG)
+        self.assertEqual(run.returncode, 0, "native trimmer exited with %d: %s" % (run.returncode, run.stderr))
+        core = proof_clause_log._dependency_core(run.stdout)
+        # The refutation uses the axiom (mod x 3) >= 0, not the other two.
+        self.assertIn("(arith ", core)
+        self.assertNotIn("(div x 3)", core)
+        context = z3.Context()
+        assertions, fragment = proof_certificate.parse_assertions(_MOD_AXIOM, context, integer=True)
+        certificate = proof_clause_log.build_certificate(_MOD_AXIOM, fragment, assertions, core, context)
+        self.assertEqual(certificate["fragment"], "qf_lia")
+        self.assertIn(["arith"], [d["parameters"] for d in certificate["declarations"] if d["name"] == "th-lemma"])
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmer_survives_hints_without_a_checker_plugin(self):
+        # Any hint name the checker does not know must be trimmed as the
+        # clause it is logged with, never crash the trimmer.
+        for name in ("arith", "unchecked-hint"):
+            log = _MOD_AXIOM_LOG.replace("(declare-fun arith ", "(declare-fun %s " % name)
+            log = log.replace("Proof (arith ", "Proof (%s " % name)
+            with self.subTest(hint=name):
+                run = self.trim(log)
+                self.assertEqual(run.returncode, 0, "native trimmer exited with %d" % run.returncode)
+                self.assertIn("(infer rup", run.stdout)
+                self.assertIn("(%s " % name, run.stdout)
+
+    def test_a_crashed_trimmer_is_reported_with_its_exit_status(self):
+        # A trimmer killed by a signal prints nothing; the error must still
+        # say what happened instead of "native proof trimming failed: ".
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
+            crashed = subprocess.CompletedProcess([], -11, "", "")
+            with patch.object(proof_clause_log.subprocess, "run", return_value=crashed):
+                with self.assertRaisesRegex(proof_certificate.ProofExportError,
+                                            r"native proof trimming failed.*(-11|signal 11|SIGSEGV)"):
+                    proof_clause_log.trim_clause_log("unused", _LRA_LOG)
+
+    @unittest.skipUnless(_z3_available(), "the z3 executable is required for proof trimming")
+    def test_native_trimmed_division_certificates_replay(self):
+        for source in (_MOD_AXIOM, _LIA_DIV):
+            with self.subTest(source=source.splitlines()[1]):
+                with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                        patch.object(proof_clause_log, "_dependency_core",
+                                     wraps=proof_clause_log._dependency_core) as core:
+                    certificate = proof_certificate.export_clause_log_certificate(source)
+                self.assertEqual(core.call_count, 1)
+                self.assertEqual(certificate["fragment"], "qf_lia")
+                self.assertIn(["arith"], [d["parameters"] for d in certificate["declarations"]
+                                          if d["name"] == "th-lemma"])
+
+
 if __name__ == "__main__":
     unittest.main()

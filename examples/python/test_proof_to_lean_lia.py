@@ -290,6 +290,20 @@ def random_division_instance(seed, variables=4, constraints=10, functions=False)
     return source if solver.check() == z3.unsat else None
 
 
+def many_division_axioms(count):
+    """lia_div's refutation next to count satisfiable constraints over div and mod.
+
+    Each constraint adds the arithmetic solver's six div/mod axiom clauses to
+    the clause log (about 1.3 KB), none of which the refutation needs.
+    """
+    lines = ["(set-logic QF_LIA)", "(declare-const x Int)", "(declare-const y Int)"]
+    lines += ["(declare-const z%d Int)" % i for i in range(count)]
+    lines += ["(assert (<= (div z%d 3) (mod z%d 5)))" % (i, i) for i in range(count)]
+    lines += ["(assert (= y (div x 3)))", "(assert (>= x 7))", "(assert (<= x 8))", "(assert (not (= y 2)))",
+              "(check-sat)"]
+    return "\n".join(lines) + "\n"
+
+
 def wide_rewrite_instance(variables=9):
     """Every variable in [5, 7] and one clause asking for one of them outside.
 
@@ -764,6 +778,42 @@ class TestIntegerLeanIntegration(unittest.TestCase):
             with self.subTest(seed=seed):
                 hints |= _hints(self.check(source))
         self.assertLessEqual({"arith", "farkas", "bound", "cut", "euf"}, hints)
+
+    def test_trimmed_logs_with_division_axioms_verify(self):
+        # Logs above proof_clause_log._TRIM_THRESHOLD go through Z3's native
+        # trimmer, which crashed (exit 139) on the `arith` hint of the div and
+        # mod axioms. Force that path on the division inputs and the pinned
+        # seeds it can trim (lia_mod_sum and seed 19 also need the trimmer's
+        # level-0 conflict fixed: it reports the empty clause as its own
+        # dependency, a separate defect).
+        sources = [(name, LIA_INPUTS[name]) for name in ("lia_div", "lia_negative_divisor", "lia_div_sum")]
+        sources += [("seed %d" % seed, random_division_instance(seed)) for seed in (23, 27)]
+        hints = set()
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                patch.object(proof_clause_log, "_dependency_core",
+                             wraps=proof_clause_log._dependency_core) as core:
+            for name, source in sources:
+                with self.subTest(name=name):
+                    core.reset_mock()
+                    certificate = self.check(source)
+                    self.assertEqual(core.call_count, 1)
+                    hints |= _hints(certificate)
+        # The trimmed refutations still rest on the div/mod axioms.
+        self.assertLessEqual({"arith", "farkas"}, hints)
+
+    def test_large_logs_with_division_axioms_verify(self):
+        # A thousand unrelated div/mod atoms put about 1.3 MB of axiom clauses
+        # into the clause log, so the export takes the trimmed path without
+        # patching; the refutation itself is lia_div's.
+        source = many_division_axioms(1000)
+        commands, _, _ = proof_certificate.query_snapshot(source, None)
+        raw = proof_clause_log.run_clause_log(proof_certificate.default_z3_executable(), commands)
+        self.assertGreater(len(raw), proof_clause_log._TRIM_THRESHOLD, "enlarge the instance")
+        with patch.object(proof_clause_log, "_dependency_core", wraps=proof_clause_log._dependency_core) as core:
+            certificate = self.check(source)
+        self.assertEqual(core.call_count, 1)
+        self.assertEqual(len(certificate["assertions"]), 1004)
+        self.assertIn("arith", _hints(certificate))
 
     def test_arith_lemmas_over_real_atoms_verify(self):
         # The arith hint is accepted in Real certificates too, where grind
