@@ -346,6 +346,48 @@ evidence into proof parameters. Arithmetic normalization/rounding rewrite
 support is the complementary checker work with the largest immediate
 full-proof coverage impact.
 
+## Implied equalities without coefficients: 2026-11-05
+
+`theory_lra::assign_eq` labels equalities between two columns fixed at the
+same value as `th-lemma arith implied-eq` and supplies no coefficients
+(the premises are the flattened bound explanations of both columns). The
+clausal companion `(or (= a b) (not l) (not u))` likewise carries none.
+Before this extension both forms remained `th-lemma` obligations: the
+unit-coefficient check rejects negated equalities, and the triangle
+tautology only matched one orientation of the bounds. In the 2026-11-05
+baseline they were the largest obligation families (for example
+`eq(3/1:Int -> +:Int(-2/1:Int,u0:Int))`, 58 pending steps in seven
+QF_UFLIA cases).
+
+[`Z3ArithImpliedEq.fst`](Z3ArithImpliedEq.fst) splits a numeric equality
+`a = b` into `a <= b` and `a >= b`. For each direction an **untrusted**
+exact-rational phase-one simplex (Bland's rule, bounded pivots) looks for
+Farkas weights over the unit-weight prepared assumptions: equality
+premises may receive either sign, unusable literals weight zero, and the
+weights are rescaled to integers against the kernel's denominator
+cross-multiplication. Each candidate is then re-checked by the existing
+verified `Z3LinearArithmeticAst.check`, including integer strict-bound
+strengthening, and the two bounds yield the equality through the verified
+`Z3ArithmeticRewrite.triangle_equality` tautology:
+
+| Lemma | Statement |
+|---|---|
+| `lemma_certified` | both checked certificates and the triangle clause imply `lit_true (= a b)` |
+| `lemma_implied_equality` | the search result, re-checked, implies the conclusion |
+| `lemma_implied_clause` | `(or (= a b) (not l) (not u))` holds when `[l; u]` imply `a = b` |
+
+`Z3TheoryNormalize.consequence` tries these only after its existing
+checks fail, so steps that were already accepted take the same path. A
+missing or wrong search result can only leave an obligation pending.
+
+On the 242-case regression corpus (solver timeout 10 s) this changes 15
+verdicts from `PARTIAL` to `ACCEPT` (nine `Wisa`/`wisas` and four
+`EufLaArithmetic/hard` QF_UFLIA cases, plus one AUFLIA and one UFLIA case
+whose single obligation was an implied equality) and reduces pending
+steps from 2,062 to 38, with no verdict regressions. Summed checking time
+of cases completing in both runs was unchanged (262.4 s before, 253.1 s
+after, under different machine load).
+
 ## Validation and reproducibility
 
 The bottom-up F* verification, extraction, and Zarith-linked native build
