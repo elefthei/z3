@@ -15,6 +15,7 @@ module QN = Z3QuantifierNnf
 module LR = Z3LambdaRewrite
 module BV = Z3BvLemma
 module DT = Z3DatatypeLemma
+module FS = Z3ArithFarkasSearch
 module L = FStar.List.Tot
 
 type datatype_view = (value -> (int & int)) & (value -> list value)
@@ -198,7 +199,8 @@ let sequent (facts:list expr) (conclusion:expr) : expr =
 let direct_consequence (facts:list expr) (conclusion:expr) : bool =
   Z3QuantifierPull.boolean_args facts && get_sort conclusion = bool_sort &&
   (LA.check (unit_coefficients conclusion facts) conclusion facts ||
-   tautology (sequent facts conclusion))
+   tautology (sequent facts conclusion) ||
+   FS.consequence facts conclusion)
 
 let lemma_direct_consequence (i:interpretation value) (rho:env value)
                              (facts:list expr) (conclusion:expr)
@@ -206,11 +208,12 @@ let lemma_direct_consequence (i:interpretation value) (rho:env value)
           (ensures lit_true i rho conclusion)
   = if LA.check (unit_coefficients conclusion facts) conclusion facts
     then LE.lemma_check_with_numeric_model (unit_coefficients conclusion facts) conclusion facts i rho
-    else (
+    else if tautology (sequent facts conclusion) then (
       lemma_tautology i rho (sequent facts conclusion);
       match eval i (App (B.connective_decl B.Conjunction facts) facts) rho with
       | VBool _ -> ()
       | _ -> ())
+    else FS.lemma_consequence i rho facts conclusion
 
 let rec contains (needle e:expr) : Tot bool (decreases e) =
   needle = e ||

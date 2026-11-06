@@ -2114,7 +2114,12 @@ let arithmetic_triangle_clauses () =
   check true "(or (not (= x y)) (>= (- x y) 0))";
   check false "(or (not (= x y)) (< (- x y) 0))";
   check false "(or (not (= x y)) (<= (- x y) (- 1)))";
-  check false "(or (= x y) (not (< (- x y) 0)) (not (>= (- x y) 0)))";
+  check true "(or (= x y) (not (>= (- x y) 0)) (not (<= (- x y) 0)))";
+  check true "(or (= 1 x) (not (<= x 1)) (not (>= x 1)))";
+  (* Contradictory bounds make this clause valid; a searched Farkas weight
+     proves it without the triangle matcher. *)
+  check true "(or (= x y) (not (< (- x y) 0)) (not (>= (- x y) 0)))";
+  check false "(or (= x y) (not (< (- x y) 0)) (not (> (- x y) (- 1))))";
   check false "(or (= x y) (not (<= (- x y) 0)) (not (<= (- x y) 0)))";
   check false "(or (= x (+ 1 y)) (not (<= (- x y) 0)) (not (>= (- x y) 0)))"
 

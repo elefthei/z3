@@ -52,6 +52,42 @@ projection contract. The pre-existing untyped-environment foundation gap
 documented below remains; these are conditional semantic theorems, not
 an unconditional SMT-LIB soundness result.
 
+## Implied equalities without coefficients
+
+`theory_lra` labels equalities of two fixed variables
+`th-lemma arith implied-eq` and supplies the explaining bound literals as
+premises, but no Farkas coefficients. The unified kernel previously checked
+such steps only with unit weights on every premise, and an equality
+conclusion could not be negated by the Farkas checker at all, so these
+steps stayed `th-lemma` obligations (for example `(= 15 (+ 1 y))` from
+`(not (>= y 15))` and `(not (<= y 13))`).
+
+[`Z3ArithFarkasSearch.fst`](Z3ArithFarkasSearch.fst) adds an untrusted
+Fourier-Motzkin search over the same integer-strengthened literal
+contributions used by `Z3LinearArithmeticAst.check`. It tracks how each
+derived row is composed from the input literals, substitutes equalities
+first, and gives up after 64 eliminations or 256 rows. Literals outside the
+linear fragment get weight zero. The search only proposes coefficients:
+`farkas` re-runs the verified `A.check` on them, so a search defect can lose
+coverage but cannot admit a step. An Int/Real equality conclusion `(= a b)`
+is accepted only when both `(<= a b)` and `(>= a b)` pass that check;
+`lemma_equality` derives the equality from the two numeric projections
+(integer injectivity of `of_int`, Real reflection already in
+`numeric_model`) and `eq_sound`. `Z3TheoryNormalize.direct_consequence`
+tries this after its existing unit-weight and tautology checks, so it
+applies to every actual-premise `th-lemma`.
+
+The triangle-equality matcher in `Z3ArithmeticRewrite.fst` now also accepts
+the two bound literals in either order, for clauses like
+`(or (= 1 x) (not (<= x 1)) (not (>= x 1)))`.
+
+On the 242-case regression corpus at `b188ff772`, pending obligations on
+cases with a verdict in both runs fell from 2,062 to 31. Fifteen `PARTIAL`
+cases became `ACCEPT`, including `QF_UFLIA/.../EufLaArithmetic/hard/hard16`,
+`hard17` and `hard20` (370, 480 and 522 pending before). No verdict got
+worse, and total check time stayed within noise (262.4 s before, 258.7 s
+after on the 201 cases with timings in both runs).
+
 ## Result
 
 Arithmetic Farkas certificates now pass through the full proof exporter,
