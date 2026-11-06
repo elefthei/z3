@@ -1275,6 +1275,22 @@ class TestFragmentClassification(unittest.TestCase):
                 self.assertEqual(self.classify(source), "qf_uflia")
         self.assertEqual(self.classify(_UFLIA), "qf_uflia")
 
+    def test_integer_numerals_coerced_to_real_are_real_constants(self):
+        # (to_real k) for a numeral k is Z3's reading of an integer numeral in a
+        # Real context (no set-logic, or ALL); it is a Real constant, not a mix
+        # of Int and Real. Today: "unsupported arithmetic operator: to_real".
+        from test_proof_to_lean_arith import REAL_COERCION_INPUTS
+        for name, (source, fragment) in REAL_COERCION_INPUTS.items():
+            with self.subTest(name=name):
+                _, classified = proof_certificate.parse_assertions(source, z3.Context())
+                self.assertEqual(classified, fragment)
+        # A conversion of an Int term stays mixed arithmetic.
+        for source in ["(declare-const n Int)(declare-const x Real)(assert (> x (to_real n)))",
+                       "(declare-const n Int)(declare-const x Real)(assert (> x (to_real (+ n 1))))"]:
+            with self.subTest(source=source):
+                with self.assertRaises(proof_certificate.ProofExportError):
+                    proof_certificate.parse_assertions(source, z3.Context(), integer=True)
+
     def test_nonlinear_integer_and_other_inputs_are_rejected(self):
         for source, message in [
             ("(declare-const x Real)(assert (> (* x x) 1.0))", "nonlinear"),
