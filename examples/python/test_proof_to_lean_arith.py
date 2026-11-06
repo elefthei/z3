@@ -474,6 +474,43 @@ class TestArithmeticValidation(unittest.TestCase):
             proof_to_lean.reconstruct(source, tampered)
 
 
+class TestFarkasMultipliers(unittest.TestCase):
+    """The weights a farkas lemma is proved from in Lean: hint weights, equality multipliers solved."""
+
+    def test_inequality_weights_are_the_hint_coefficients(self):
+        # 2 * (x - 1 <= 0) + (-2x + 3 <= 0): 1 <= 0.
+        constraints = [(Fraction(2), "<=", {0: Fraction(1)}, Fraction(-1)),
+                       (Fraction(1), "<=", {0: Fraction(-2)}, Fraction(3))]
+        self.assertEqual(proof_to_lean._farkas_multipliers(constraints), [2, 1])
+
+    def test_equality_multipliers_are_solved(self):
+        # x - y = 0, y + 1 <= 0, -x <= 0: the equality enters with -1 whatever the hint says.
+        constraints = [(Fraction(7), "=", {0: Fraction(1), 1: Fraction(-1)}, Fraction(0)),
+                       (Fraction(1), "<=", {1: Fraction(1)}, Fraction(1)),
+                       (Fraction(1), "<=", {0: Fraction(-1)}, Fraction(0))]
+        self.assertEqual(proof_to_lean._farkas_multipliers(constraints), [1, 1, 1])
+        constraints[0] = (Fraction(7), "=", {0: Fraction(-1), 1: Fraction(1)}, Fraction(0))
+        self.assertEqual(proof_to_lean._farkas_multipliers(constraints), [-1, 1, 1])
+
+    def test_inconsistent_equalities_alone(self):
+        constraints = [(Fraction(1), "=", {0: Fraction(1)}, Fraction(0)),
+                       (Fraction(1), "<=", {1: Fraction(1)}, Fraction(0)),
+                       (Fraction(1), "=", {0: Fraction(1)}, Fraction(-1))]
+        self.assertEqual(proof_to_lean._farkas_multipliers(constraints), [-1, 0, 1])
+
+    def test_weights_that_do_not_refute_are_rejected(self):
+        # A strict sum of zero refutes; a non-strict one does not; a negative inequality weight never counts.
+        strict = [(Fraction(1), "<", {0: Fraction(1)}, Fraction(0)),
+                  (Fraction(1), "<=", {0: Fraction(-1)}, Fraction(0))]
+        self.assertEqual(proof_to_lean._farkas_multipliers(strict), [1, 1])
+        self.assertIsNone(proof_to_lean._farkas_multipliers([(Fraction(1), "<=", terms, constant)
+                                                              for _, _, terms, constant in strict]))
+        self.assertIsNone(proof_to_lean._farkas_multipliers([(Fraction(1), "<=", {0: Fraction(1)}, Fraction(0)),
+                                                             (Fraction(1), "<=", {0: Fraction(1)}, Fraction(0))]))
+        self.assertIsNone(proof_to_lean._farkas_multipliers([(Fraction(-1), "<=", {0: Fraction(1)}, Fraction(1)),
+                                                             (Fraction(1), "<=", {0: Fraction(1)}, Fraction(0))]))
+
+
 @unittest.skipUnless(_z3_available(), "the z3 executable is required for the clause log")
 class TestArithmeticLeanIntegration(unittest.TestCase):
     """End-to-end: z3 clause log, certificate, Lean reconstruction, kernel check."""
@@ -562,6 +599,23 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
         ]:
             with self.subTest(source=source):
                 self.check(source)
+
+    def test_dense_farkas_lemma_is_checked_from_its_coefficients(self):
+        # One farkas lemma over 20 Real variables and 21 literals with weights
+        # up to 1,000. The certificate carries the weights and the replay
+        # re-derives them, but Lean searches for the combination with grind,
+        # which does not finish in minutes; summing the scaled literals with
+        # the weights closes the same lemma in about two seconds.
+        from test_proof_to_lean_lia import _DENSE_BUDGET, bounded_lean_runs, dense_farkas_instance
+        source = dense_farkas_instance(1, 20, sort="Real")
+        certificate = proof_certificate.export_clause_log_certificate(source)
+        farkas = [d["parameters"] for d in certificate["declarations"]
+                  if d["name"] == "th-lemma" and d["parameters"][:1] == ["farkas"]]
+        self.assertEqual(len(farkas), 1)
+        self.assertEqual(len(farkas[0]), 22)  # the hint and one weight per row
+        with bounded_lean_runs(_DENSE_BUDGET):
+            _, report = self.check(source)
+        self.assertIn(_STANDARD_AXIOMS, report)
 
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
@@ -801,10 +855,12 @@ class TestLegacyArithmeticValidation(unittest.TestCase):
             parameters = _th_lemma_parameters(certificate, node)
             self.assertEqual(parameters[0], "farkas")
             self.assertEqual(len(parameters) - 1, len(premises))  # a conflict concludes false: no clause literals
+            # Proved from its weights: the premises' scaled constraints are summed.
             self.assertRegex(self.text, (
                 r"private theorem th_lemma_%d \(_atoms : Nat -> Prop\) \(_vars : Nat -> Rat\)\n"
-                r"    : (\(formula_\d+ _atoms _vars\) -> ){%d}\(formula_\d+ _atoms _vars\) := by\n"
-                r"  unfold [^\n]*\n  grind") % (node, len(premises)))
+                r"    : (\(formula_\d+ _atoms _vars\) -> ){%d}\(formula_\d+ _atoms _vars\) :=\n"
+                r"  fun %s => th_lemma_%d_sum ") % (
+                    node, len(premises), " ".join("_p%d" % index for index in range(len(premises))), node))
             self.assertIn("(th_lemma_%d _atoms _vars%s)" % (node, "".join(" _step_%d" % p for p in premises)), self.text)
         # Congruence through an arithmetic operator or comparison is a grind
         # lemma taking the argument equalities as premises; Boolean congruence

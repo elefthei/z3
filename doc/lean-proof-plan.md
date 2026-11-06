@@ -1212,6 +1212,30 @@ valid equality propagation with positive or negative nonzero conclusion
 coefficients. This changes native checker acceptance, not solver search
 or Lean's independent verification of the implied equality.
 
+### Farkas lemmas proved from their weights (2026-11-06)
+
+Lean proved every `farkas` and `bound` th-lemma by search (`first | omega |
+grind` over Int, `grind` over Rat), although the certificate records the
+combination and `_check_th_lemma` re-derives it. One dense lemma, 10 Int or
+20 Real variables with weights up to 1,000, ran for minutes, and 25 of the 82
+th-lemmas of QF_LIA `cut_lemmas/20-vars/cut_lemma_03_012` each exceeded
+120 s. `proof_to_lean._farkas_lemma` now proves such a lemma from its
+weights. Inequality weights are the hint's coefficients; equality
+multipliers are solved by Gaussian elimination, and the result is verified
+by summation. Each premise and denied clause literal gets a lemma stating
+its constraint scaled to an integer row and weight, proved alone by the
+theory tactic. Generic `farkas_add_*` lemmas add these rows in a balanced
+tree, and `omega` or `grind` refutes the sum, whose variables cancel, over
+abstract variables. The lemma statement is unchanged. Lemmas without usable
+weights still use the search: cuts, coefficient-free integer farkas, integer
+`bound` steps that round, and `implied-eq`. The dense test instances now
+check in 4 s (Int) and 9 s (Real). In `cut_lemma_03_012` every weighted lemma
+checks alone in at most 28 s; the 3 `cut` lemmas still exceed 120 s, so the
+file is not certified yet. Tests: `test_proof_to_lean_lia.py` and
+`test_proof_to_lean_arith.py`
+(`test_dense_farkas_lemma_is_checked_from_its_coefficients`), and
+`TestFarkasMultipliers`.
+
 ### Native arithmetic row strictness (2026-10-16)
 
 The native arithmetic checker now keeps strictness on each linear row, not

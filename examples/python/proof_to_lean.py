@@ -2406,6 +2406,200 @@ def _check_th_lemma(graph, node):
             parameters[0], node))
 
 
+_RELATION_NAMES = {"<=": "le", "<": "lt", "=": "eq"}
+
+
+def _farkas_multipliers(constraints):
+    """Return one multiplier per constraint whose weighted sum is a constant contradiction, or None.
+
+    constraints are as in linear_combination_refutes. Inequalities keep their
+    hint coefficients; the multipliers of equalities, which the hint does not
+    fix, are solved for by Gaussian elimination, each pivot row tracked as a
+    combination of the original equalities. The result is verified by
+    summing every constraint with its multiplier.
+    """
+    multipliers, total = [Fraction(0)] * len(constraints), {}
+    for index, (coefficient, relation, terms, _) in enumerate(constraints):
+        if relation == "=":
+            continue
+        if coefficient < 0:
+            return None
+        multipliers[index] = coefficient
+        for variable, value in terms.items():
+            total[variable] = total.get(variable, Fraction(0)) + coefficient * value
+    pivots = []
+    for index, (_, relation, terms, offset) in enumerate(constraints):
+        if relation != "=":
+            continue
+        row, row_constant, combination = dict(terms), offset, {index: Fraction(1)}
+        for pivot, pivot_row, pivot_constant, pivot_combination in pivots:
+            factor = row.get(pivot, Fraction(0))
+            if factor:
+                for variable, value in pivot_row.items():
+                    row[variable] = row.get(variable, Fraction(0)) - factor * value
+                row_constant -= factor * pivot_constant
+                for other, value in pivot_combination.items():
+                    combination[other] = combination.get(other, Fraction(0)) - factor * value
+        row = {variable: value for variable, value in row.items() if value != 0}
+        if not row:
+            if row_constant != 0:
+                # The equalities alone are inconsistent: their combination is a nonzero constant.
+                multipliers = [Fraction(0)] * len(constraints)
+                for other, value in combination.items():
+                    multipliers[other] = value
+                break
+            continue
+        pivot = min(row)
+        scale = row[pivot]
+        pivots.append((pivot, {variable: value / scale for variable, value in row.items()}, row_constant / scale,
+                       {other: value / scale for other, value in combination.items()}))
+    else:
+        for pivot, pivot_row, _, pivot_combination in pivots:
+            factor = total.get(pivot, Fraction(0))
+            if factor:
+                for variable, value in pivot_row.items():
+                    total[variable] = total.get(variable, Fraction(0)) - factor * value
+                for other, value in pivot_combination.items():
+                    multipliers[other] -= factor * value
+    total, constant = {}, Fraction(0)
+    for multiplier, (_, relation, terms, offset) in zip(multipliers, constraints):
+        if relation != "=" and multiplier < 0:
+            return None
+        for variable, value in terms.items():
+            total[variable] = total.get(variable, Fraction(0)) + multiplier * value
+        constant += multiplier * offset
+    if any(value != 0 for value in total.values()):
+        return None
+    relation = _summed_relation(relation for multiplier, (_, relation, _, _) in zip(multipliers, constraints)
+                                if multiplier != 0)
+    refuted = {"<": constant >= 0, "<=": constant > 0, "=": constant != 0}[relation]
+    return multipliers if refuted else None
+
+
+def _summed_relation(relations):
+    relations = set(relations)
+    return "<" if "<" in relations else "<=" if "<=" in relations else "="
+
+
+def _farkas_lemma(graph, node, atom_indices, variable_indices):
+    """Prove a farkas or bound th-lemma from its weights instead of searching for the combination.
+
+    Returns None when the weights do not linearly refute the denied literals
+    (an integer bound that rounds, an implied equality, a lemma without
+    coefficients): those keep _grind_lemma. Otherwise each premise and denied
+    clause literal gets a lemma stating its constraint scaled by its integer
+    weight, terms + constant REL 0, proved alone by the theory tactic; the
+    scaled facts are added by generic lemmas, and the sum, whose variables
+    cancel, is refuted by omega or grind over abstract variables. The
+    statement is the one _grind_lemma proves, so callers are unchanged.
+    """
+    parameters = graph.decl(node).parameters
+    if parameters[0] not in ("farkas", "bound") or len(parameters) == 1:
+        return None
+    premises = graph.arguments(node)[:-1]
+    conclusion = graph.conclusion(node)
+    literals = list(graph.clause(conclusion))
+    coefficients = [Fraction(parameter) for parameter in parameters[1:]]
+    sources, constraints = [], []
+    for position, (coefficient, premise) in enumerate(zip(coefficients, premises)):
+        sources.append(("premise", position, graph.conclusion(premise)))
+        constraints.append((coefficient,) + _atom_constraint(graph, graph.conclusion(premise)))
+    for position, (coefficient, literal) in enumerate(zip(coefficients[len(premises):], literals)):
+        sources.append(("literal", position, literal))
+        constraints.append((coefficient,) + _linear_constraint(graph, literal))
+    multipliers = _farkas_multipliers(constraints)
+    if multipliers is None:
+        return None
+    # Integer weights over integer rows: scale each row to integer
+    # coefficients, then the weights to integers with gcd one.
+    used = []
+    for multiplier, source, (_, relation, terms, constant) in zip(multipliers, sources, constraints):
+        if multiplier == 0:
+            continue
+        scale = _common_denominator(terms, constant)
+        used.append((multiplier / scale, source, relation,
+                     {variable: value * scale for variable, value in terms.items()}, constant * scale))
+    denominator = 1
+    for weight, _, _, _, _ in used:
+        denominator = denominator * weight.denominator // _gcd(denominator, weight.denominator)
+    divisor = 0
+    for weight, _, _, _, _ in used:
+        divisor = _gcd(divisor, abs((weight * denominator).numerator))
+    variables = sorted({variable for _, _, _, terms, _ in used for variable in terms})
+    names = {variable: "x%d" % index for index, variable in enumerate(variables)}
+    number = graph.number_type
+
+    def scaled(weight, terms, constant, leaf):
+        parts = ["((%d : %s)) * %s" % (int(weight * terms[variable]), number, leaf(variable))
+                 for variable in sorted(terms)]
+        parts.append("((%d : %s))" % (int(weight * constant), number))
+        return "(%s)" % " + ".join(parts)
+
+    def inline(sub):
+        return "(%s)" % _inline(graph, sub, atom_indices, variable_indices)
+
+    prefix = "th_lemma_%d" % node
+    binder = "(_atoms : Nat -> Prop)%s" % _valuation_binder(graph)
+    lines, facts = [], []
+    for index, (weight, (kind, position, formula), relation, terms, constant) in enumerate(used):
+        weight = int(weight * denominator / divisor)
+        hypothesis = inline(formula) if kind == "premise" else "(Not %s)" % inline(formula)
+        lines.extend([
+            "", "set_option maxHeartbeats 1000000 in",
+            "private theorem %s_fact_%d %s" % (prefix, index, binder),
+            "    : %s -> %s %s ((0 : %s)) := by" % (hypothesis, scaled(weight, terms, constant, inline), relation, number),
+            "  intro _h",
+            "  " + _theory_tactic(graph),
+        ])
+        argument = "_p%d" % position if kind == "premise" else "(fun _h => _nc %s)" % _inject(position, len(literals), "_h")
+        facts.append(("(%s_fact_%d _atoms%s %s)" % (prefix, index, graph.valuation, argument),
+                      scaled(weight, terms, constant, lambda variable: names[variable]), relation))
+
+    def add(items):
+        if len(items) == 1:
+            return items[0]
+        middle = len(items) // 2
+        left, left_sum, left_relation = add(items[:middle])
+        right, right_sum, right_relation = add(items[middle:])
+        additions.add((left_relation, right_relation))
+        return ("(farkas_add_%s_%s %s %s)" % (_RELATION_NAMES[left_relation], _RELATION_NAMES[right_relation],
+                                              left, right),
+                "(%s + %s)" % (left_sum, right_sum), _summed_relation((left_relation, right_relation)))
+
+    additions = set()
+    proof, total, relation = add(facts)
+    lines.extend([
+        "", "private theorem %s_sum (%s : %s)" % (prefix, " ".join(names[variable] for variable in variables), number)
+        if variables else "private theorem %s_sum" % prefix,
+        "    : %s %s ((0 : %s)) -> False := by" % (total, relation, number),
+        "  intro _s",
+        "  " + ("omega" if graph.numeric == "Int" else "grind"),
+    ])
+    statement = " -> ".join([_formula(graph, graph.conclusion(premise)) for premise in premises]
+                            + [_formula(graph, conclusion)])
+    body = "%s_sum%s %s" % (prefix, "".join(" " + inline(variable) for variable in variables), proof)
+    if literals:
+        body = "Classical.byContradiction fun _nc => " + body
+    if premises:
+        body = "fun %s => %s" % (" ".join("_p%d" % index for index in range(len(premises))), body)
+    lines.extend(["", "private theorem %s %s" % (prefix, binder), "    : %s :=" % statement, "  " + body])
+    return lines, additions, "(%s _atoms%s%s)" % (prefix, graph.valuation,
+                                                  "".join(" _step_%d" % premise for premise in premises))
+
+
+def _farkas_additions(graph, additions):
+    """The generic lemmas adding two scaled facts, each relating a sum to zero."""
+    lines = []
+    tactic = "omega" if graph.numeric == "Int" else "grind"
+    for left, right in sorted(additions):
+        lines.extend([
+            "", "private theorem farkas_add_%s_%s {_a _b : %s} (_ha : _a %s 0) (_hb : _b %s 0)" % (
+                _RELATION_NAMES[left], _RELATION_NAMES[right], graph.number_type, left, right),
+            "    : _a + _b %s 0 := by %s" % (_summed_relation((left, right)), tactic),
+        ])
+    return lines
+
+
 def _check_triangle_eq(graph, node, premises, literals):
     """A legacy axiom relating a Real equality to inequalities: one equality literal, linear atoms otherwise.
 
@@ -2691,10 +2885,17 @@ def reconstruct(source, certificate):
             lines.append("def formula_%d %s : Prop := %s" % (
                 node, signature, _formula_body(graph, node, atom_indices)))
     rewrites, def_axioms, th_lemmas, decidable_atoms, decidable_formulas = {}, {}, {}, set(), set()
+    farkas_additions = set()
     for node in range(len(graph.nodes)):
         if graph.kind(node) == z3.Z3_OP_PR_TH_LEMMA:
             _check_th_lemma(graph, node)
-            lemma, term = _grind_lemma(graph, node, "th_lemma", atom_indices, variable_indices)
+            weighted = _farkas_lemma(graph, node, atom_indices, variable_indices)
+            if weighted is None:
+                lemma, term = _grind_lemma(graph, node, "th_lemma", atom_indices, variable_indices)
+            else:
+                lemma, needed, term = weighted
+                lines.extend(_farkas_additions(graph, needed - farkas_additions))
+                farkas_additions.update(needed)
             lines.extend(lemma)
             th_lemmas[node] = term
         elif graph.kind(node) == z3.Z3_OP_PR_REWRITE:
