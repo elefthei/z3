@@ -1193,6 +1193,24 @@ negations are covered too. Tests: `test_proof_certificate.py`
 `test_proof_to_lean_uf.py` (`UF_NEGATED_ITE_CONDITION`, both cores,
 nested negations, and rejection of a gate with its guard reversed).
 
+**Outlined proofs over many assertions (2026-11-06).** Every outlined lemma
+takes the original assertions as one hypothesis `_inputs : Inputs ...`. The
+bundle was a right-nested `And`, and assertion i was projected with i
+`And.right`s. The clause log outlines any input with a few hundred
+assertions. Above about 450 assertions Lean rejected the `Inputs` definition
+("maximum recursion depth has been reached"), and with that limit raised by
+hand the projections ran out of heartbeats: the cost was O(assertions x
+position) per lemma. This hit SMPT QF_LIA `BART-PT-002/RF-00` (1,211
+assertions) and `BART-PT-005/RC-11` (2,396). `Inputs`, the `And.intro` built
+by `theorem unsat`, and the projections now use a balanced conjunction tree,
+so each is O(log n) deep. The theorem statement and the trust settings are
+unchanged (no `maxHeartbeats` override). Both BART files now check in Lean in
+under a minute. Tests: `test_proof_to_lean_arith.py`
+(`test_outlined_refutation_over_many_assertions`, 1,210 assertions, outlined
+without an override) and `test_proof_to_lean_integration.py`
+(`test_outlined_propositional_refutation_over_many_assertions`, 1,203
+assertions, axiom-free).
+
 ## Arithmetic proof infrastructure
 
 ### Native implied-equality conclusions (2026-10-19)

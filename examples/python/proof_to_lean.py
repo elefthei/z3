@@ -633,6 +633,33 @@ def _fold(operator, arguments, identity):
     return result
 
 
+def _balanced(operator, arguments, identity):
+    """Fold into a balanced tree, so n arguments nest only O(log n) deep."""
+    if not arguments:
+        return identity
+    if len(arguments) == 1:
+        return arguments[0]
+    middle = len(arguments) // 2
+    return "(%s %s %s)" % (operator, _balanced(operator, arguments[:middle], identity),
+                           _balanced(operator, arguments[middle:], identity))
+
+
+def _balanced_project(position, count, term):
+    """Project argument `position` out of a _balanced conjunction of `count`."""
+    path = []
+    while count > 1:
+        middle = count // 2
+        if position < middle:
+            path.append("And.left")
+            count = middle
+        else:
+            path.append("And.right")
+            position, count = position - middle, count - middle
+    for projection in path:
+        term = "(%s %s)" % (projection, term)
+    return term
+
+
 def _formula(graph, node):
     return "(formula_%d _atoms%s)" % (node, graph.valuation)
 
@@ -2585,7 +2612,9 @@ def _outline_steps(graph, steps, dependencies, signature):
     """
     classical = bool(graph.arithmetic or graph.uninterpreted)
     boundaries = _outline_boundaries(graph)
-    inputs = _fold("And", [_formula(graph, node) for node in graph.assertions], "True")
+    # Balanced, so neither the definition nor a projection nests deeper than
+    # O(log n) for inputs with thousands of assertions.
+    inputs = _balanced("And", [_formula(graph, node) for node in graph.assertions], "True")
     lines = ["", "private def Inputs %s : Prop := %s" % (signature, inputs)]
     witnesses = {}
     for root in sorted(boundaries):
@@ -2727,7 +2756,7 @@ def reconstruct(source, certificate):
             if terms[conclusion] not in assumptions:
                 raise ReconstructionError("asserted node %d is not an original assertion" % node)
             position = assumptions[terms[conclusion]]
-            term = (_project(position, len(graph.assertions), "_inputs") if outline else "_h%d" % position)
+            term = (_balanced_project(position, len(graph.assertions), "_inputs") if outline else "_h%d" % position)
         elif graph.kind(node) == z3.Z3_OP_PR_HYPOTHESIS:
             hypothesis = hypothesis_formulas.setdefault(terms[conclusion], conclusion)
             dependencies[node] = (hypothesis,)
@@ -2809,7 +2838,7 @@ def reconstruct(source, certificate):
     if outline:
         for name in witnesses:
             lines.append("  refute_with_decidable %s fun %s =>" % (_witness_formula(graph, name), name))
-        inputs = _fold("And.intro", ["_h%d" % i for i in range(len(graph.assertions))], "True.intro")
+        inputs = _balanced("And.intro", ["_h%d" % i for i in range(len(graph.assertions))], "True.intro")
         lines.append("  proof_step_%d _atoms%s %s%s" % (
             graph.proof, graph.valuation, inputs, "".join(" " + name for name in witnesses)))
     else:
