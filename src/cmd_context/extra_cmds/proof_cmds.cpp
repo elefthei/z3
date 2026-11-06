@@ -127,7 +127,9 @@ public:
         if (m_empty)
             return;
 
-        if (hint && !is_rup(hint)) {
+        // A hint without a checker plugin, such as the arith solver's own
+        // div/mod axioms, is trimmed as an assumption of the logged clause.
+        if (hint && !is_rup(hint) && m_checker.has_plugin(hint)) {
             auto clause1 = m_checker.clause(hint);
             if (clause1.size() != clause.size()) {
                 mk_clause(clause1);

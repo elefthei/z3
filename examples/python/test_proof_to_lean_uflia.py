@@ -626,6 +626,16 @@ class TestIntegerMixedLeanIntegration(unittest.TestCase):
         # Every hint kind of the slice, plus the exporter's own cnf bridge.
         self.assertEqual(hints, {"cut", "euf", "farkas", "implied-eq", "bound", "cnf", "arith"})
 
+    def test_trimmed_log_with_division_axioms_verifies(self):
+        # Logs above proof_clause_log._TRIM_THRESHOLD go through Z3's native
+        # trimmer, which crashed on the `arith` hint of the div/mod axioms.
+        with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0), \
+                patch.object(proof_clause_log, "_dependency_core",
+                             wraps=proof_clause_log._dependency_core) as core:
+            certificate, _ = self.check(UFLIA_INPUTS["uflia_div_mod"])
+        self.assertEqual(core.call_count, 1)
+        self.assertEqual(_hints(certificate), {"arith", "euf"})
+
     # Seeds of random_instance whose unsat core has at least three assertions,
     # pinned so the checked inputs stay the same across Z3 versions: plain,
     # with an uninterpreted sort, and with ite terms. Seed 14 with ite terms
