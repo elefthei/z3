@@ -81,6 +81,16 @@ Z3TEST_LRA_INPUTS = {
 
 _STANDARD_AXIOMS = "[propext, Classical.choice, Quot.sound]"
 
+
+def many_assertion_cycle(padding, cycle):
+    """Unsat QF_LRA input: `padding` unused bounds, then a strict cycle x0 < x1 < ... < x0."""
+    source = "".join("(declare-const y%d Real)" % i for i in range(padding))
+    source += "".join("(declare-const x%d Real)" % i for i in range(cycle))
+    source += "".join("(assert (>= y%d 0.0))" % i for i in range(padding))
+    source += "".join("(assert (< x%d x%d))" % (i, (i + 1) % cycle) for i in range(cycle))
+    return source + "(check-sat)\n"
+
+
 # Real-valued ite terms: an opaque variable to Farkas reasoning, tied to its
 # branches by gate clauses, and normalized by Z3 (abs/max shapes are rewritten).
 ITE_INPUTS = {
@@ -566,6 +576,27 @@ class TestArithmeticLeanIntegration(unittest.TestCase):
     def test_native_dependency_core_is_checked_in_lean(self):
         with patch.object(proof_clause_log, "_TRIM_THRESHOLD", 0):
             self.check(Z3TEST_LRA_INPUTS["lra_farkas"])
+
+    def test_outlined_refutation_over_many_assertions(self):
+        # Every assertion becomes a proof step in the clause log, so an input
+        # with a thousand assertions is outlined without any override, and the
+        # outlined lemmas take all assertions as one bundled hypothesis. The
+        # refutation here is a 60-variable strict cycle placed after 1,150
+        # unused bounds, the shape of SMT-LIB QF_LIA SMPT BART-PT-002/005
+        # (about 1,200 assertions), which Lean currently rejects with
+        # "maximum recursion depth has been reached" and, once that is
+        # raised, a heartbeat timeout in the lemma that projects the late
+        # assertions out of the bundle.
+        source = many_assertion_cycle(padding=1150, cycle=60)
+        certificate = proof_certificate.export_clause_log_certificate(source)
+        self.assertEqual(len(certificate["assertions"]), 1210)
+        steps = sum(1 for node in certificate["nodes"]
+                    if certificate["declarations"][node["declaration"]]["range"] == "Proof")
+        self.assertGreater(steps, proof_to_lean._OUTLINE_PROOF_STEPS)
+        certificate, report = self.check(source)
+        self.assertEqual(certificate["fragment"], "qf_lra")
+        self.assertIn(_STANDARD_AXIOMS, report)
+        self.assertIn("private theorem proof_step_", proof_to_lean.reconstruct(source, certificate))
 
     def test_outlined_proofs_preserve_original_assertions_and_scopes(self):
         with patch.object(proof_to_lean, "_OUTLINE_PROOF_STEPS", 0):
