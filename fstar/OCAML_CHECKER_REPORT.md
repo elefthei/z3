@@ -980,6 +980,26 @@ allocation aborts now hit the case timeout rather than crashing. The
 native assertion-time OOM still causes the regression runner to fail;
 it is not waived by the optimization.
 
+**Follow-up (2026-11-06): the assertion-time OOM is fixed in Z3.** The
+single assertion of `PO4-10-PO4.smt2` is a left-nested binary `and` chain
+41,822 levels deep. With `proof=true`, `asserted_formulas::assert_expr`
+rewrites the whole assertion. `bool_rewriter` flattens the chain one level
+at a time, and every intermediate flattened conjunction stays alive in the
+rewrite proof, so memory grows quadratically with the depth. Plain
+`z3 proof=true` needed 44 s and 6.6 GB before the search started, whereas
+without proofs the input solves in 0.4 s. Now, when proofs are enabled,
+`assert_expr` first splits conjunctions that contain nested conjunctions.
+It does this iteratively, without recursion, and justifies each piece
+with `and-elim`. It then rewrites and pushes the resulting conjuncts from
+left to right; the new helper is `rewrite_and_push`. Flat conjunctions and
+proof-free solving are unchanged. The same `z3 proof=true` run now takes
+0.66 s with 145 MB and the same 980 conflicts. Under the 4 GiB
+address-space limit, the checker reports `ACCEPT` (90,157 proof nodes,
+`pending=0`, 259 MB peak RSS). Old and new binaries were run on all 242
+pinned inputs under that limit. Apart from this input, verdicts, pending
+counts and obligation families are unchanged; the only difference is that
+one obligation index moved because of the extra `and-elim` nodes.
+
 The 17 harness tests, 116 current-source Linux C++ groups, and native SMT,
 matching source-built Python bindings, and command-line help checks also
 pass. Retained local artifacts include both complete replay results,
