@@ -231,6 +231,7 @@ class asserted_formulas {
     bool invoke(simplify_fmls& s);
     void swap_asserted_formulas(vector<justified_expr>& new_fmls);
     void push_assertion(expr * e, proof * pr, vector<justified_expr>& result);
+    void rewrite_and_push(expr * e, proof * pr);
     bool canceled() { return !m.inc(); }
     bool check_well_sorted() const;
     unsigned get_total_size() const;

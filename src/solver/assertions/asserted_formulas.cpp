@@ -148,11 +148,17 @@ void asserted_formulas::set_eliminate_and(bool flag) {
 }
 
 
+static bool has_nested_and(ast_manager& m, expr* e) {
+    if (!m.is_and(e))
+        return false;
+    for (expr* arg : *to_app(e))
+        if (m.is_and(arg))
+            return true;
+    return false;
+}
+
 void asserted_formulas::assert_expr(expr * e, proof * _in_pr) {
     force_push();
-    proof_ref  in_pr(_in_pr, m), pr(_in_pr, m);
-    expr_ref   e_ref(e, m);
-    expr_ref   r(e, m);
     SASSERT(m.is_bool(e));
 
     if (inconsistent())
@@ -160,6 +166,47 @@ void asserted_formulas::assert_expr(expr * e, proof * _in_pr) {
 
     if (m.is_true(e))
         return;
+
+    m_has_quantifiers |= ::has_quantifiers(e);
+
+    if (m_smt_params.m_preprocess && m.proofs_enabled() && has_nested_and(m, e)) {
+        // Rewriting a nested conjunction flattens it one level at a time. With proofs
+        // enabled, each intermediate flattened conjunction stays alive in the rewrite
+        // proof, so a chain of depth n takes O(n^2) memory. Instead, split the nested
+        // conjunctions here, justifying each conjunct by and-elim, and then rewrite the
+        // conjuncts separately, from left to right.
+        expr_ref_vector todo(m);
+        proof_ref_vector todo_pr(m);
+        todo.push_back(e);
+        todo_pr.push_back(_in_pr);
+        while (!todo.empty()) {
+            expr_ref f(todo.back(), m);
+            proof_ref f_pr(todo_pr.back(), m);
+            todo.pop_back();
+            todo_pr.pop_back();
+            if (has_nested_and(m, f)) {
+                for (unsigned i = to_app(f)->get_num_args(); i-- > 0; ) {
+                    todo.push_back(to_app(f)->get_arg(i));
+                    todo_pr.push_back(m.mk_and_elim(f_pr, i));
+                }
+                continue;
+            }
+            rewrite_and_push(f, f_pr);
+            if (inconsistent())
+                return;
+        }
+        TRACE(asserted_formulas_bug, tout << "after assert_expr\n"; display(tout););
+        return;
+    }
+
+    rewrite_and_push(e, _in_pr);
+    TRACE(asserted_formulas_bug, tout << "after assert_expr\n"; display(tout););
+}
+
+void asserted_formulas::rewrite_and_push(expr * e, proof * _in_pr) {
+    proof_ref  in_pr(_in_pr, m), pr(_in_pr, m);
+    expr_ref   e_ref(e, m);
+    expr_ref   r(e, m);
 
     if (m_smt_params.m_preprocess) {
         TRACE(assert_expr_bug, tout << r << "\n";);
@@ -174,10 +221,7 @@ void asserted_formulas::assert_expr(expr * e, proof * _in_pr) {
         TRACE(assert_expr_bug, tout << "after...\n" << r << "\n" << pr << "\n";);
     }
 
-    m_has_quantifiers |= ::has_quantifiers(e_ref);
-
     push_assertion(r, pr, m_formulas);
-    TRACE(asserted_formulas_bug, tout << "after assert_expr\n"; display(tout););
 }
 
 void asserted_formulas::assert_expr(expr * e) {
