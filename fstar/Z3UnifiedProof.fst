@@ -540,10 +540,18 @@ let rec premise_judgments (ps:list checked_fact) : Tot (list judgment) (decrease
   | [] -> []
   | p :: rest -> p.conclusion :: premise_judgments rest
 
-let rec add_hypotheses (xs ys:list expr) : Tot (list expr) (decreases xs) =
+let rec merge_hypotheses (xs ys:list expr) : Tot (list expr) (decreases xs) =
   match xs with
   | [] -> ys
-  | x :: rest -> add_hypotheses rest (if L.mem x ys then ys else x :: ys)
+  | x :: rest -> merge_hypotheses rest (if L.mem x ys then ys else x :: ys)
+
+(* Hypothesis contexts are compared as conjunctions, so their order is
+   irrelevant. Most premises carry the context of a single parent, or the
+   same context as a sibling; those cases need no quadratic merge. *)
+let add_hypotheses (xs ys:list expr) : list expr =
+  match ys with
+  | [] -> xs
+  | _ -> if xs = ys then ys else merge_hypotheses xs ys
 
 let rec premise_hypotheses (ps:list checked_fact) : Tot (list expr) (decreases ps) =
   match ps with
@@ -623,7 +631,10 @@ let check_node_with_membership (skolems:list SK.definition) (strict:bool)
       if facts = [] && Some? (proposition node.conclusion)
       then accept [] (if check_step node.kind node.conclusion facts then 0 else 1)
       else None
-    | _ -> if check_step node.kind node.conclusion facts then accept hyps 0 else None
+    | _ ->
+      (* The guard above already established the well-formedness half of check_step. *)
+      if relational_step node.kind node.conclusion facts || logical_step node.kind node.conclusion facts
+      then accept hyps 0 else None
 
 let check_node_with_context (skolems:list SK.definition) (strict:bool)
                             (assertions:list judgment) (node:proof_node)
@@ -1227,19 +1238,27 @@ let lemma_check_binder_sound (i:interpretation value) (rho:env value)
           (ensures judgment_holds i rho concl)
   = lemma_check_binder_with_inputs_sound i rho [] certificate concl
 
-let rec lemma_add_hypotheses_sound (i:interpretation value) (rho:env value)
-                                   (xs ys:list expr)
-  : Lemma (requires conj_holds i rho (add_hypotheses xs ys))
+let rec lemma_merge_hypotheses_sound (i:interpretation value) (rho:env value)
+                                     (xs ys:list expr)
+  : Lemma (requires conj_holds i rho (merge_hypotheses xs ys))
           (ensures conj_holds i rho xs /\ conj_holds i rho ys)
           (decreases xs)
   = match xs with
     | [] -> ()
     | x :: rest ->
       if L.mem x ys then (
-        lemma_add_hypotheses_sound i rho rest ys;
+        lemma_merge_hypotheses_sound i rho rest ys;
         FStar.List.Tot.Properties.mem_memP x ys;
         lemma_conj_member i rho ys x)
-      else lemma_add_hypotheses_sound i rho rest (x :: ys)
+      else lemma_merge_hypotheses_sound i rho rest (x :: ys)
+
+let lemma_add_hypotheses_sound (i:interpretation value) (rho:env value)
+                               (xs ys:list expr)
+  : Lemma (requires conj_holds i rho (add_hypotheses xs ys))
+          (ensures conj_holds i rho xs /\ conj_holds i rho ys)
+  = match ys with
+    | [] -> ()
+    | _ -> if xs = ys then () else lemma_merge_hypotheses_sound i rho xs ys
 
 let scoped_holds (i:interpretation value) (rho:env value) (p:checked_fact) : prop =
   conj_holds i rho p.hypotheses ==> judgment_holds i rho p.conclusion
@@ -1322,15 +1341,22 @@ let rec lemma_remaining_hypotheses_sound (i:interpretation value) (rho:env value
        else ());
       lemma_remaining_hypotheses_sound i rho rest concl
 
-let rec lemma_boolean_union (xs ys:list expr)
+let rec lemma_boolean_merge (xs ys:list expr)
   : Lemma (requires boolean_formulas xs /\ boolean_formulas ys)
-          (ensures boolean_formulas (add_hypotheses xs ys))
+          (ensures boolean_formulas (merge_hypotheses xs ys))
           (decreases xs)
   = match xs with
     | [] -> ()
     | x :: rest ->
-      if L.mem x ys then lemma_boolean_union rest ys
-      else lemma_boolean_union rest (x :: ys)
+      if L.mem x ys then lemma_boolean_merge rest ys
+      else lemma_boolean_merge rest (x :: ys)
+
+let lemma_boolean_union (xs ys:list expr)
+  : Lemma (requires boolean_formulas xs /\ boolean_formulas ys)
+          (ensures boolean_formulas (add_hypotheses xs ys))
+  = match ys with
+    | [] -> ()
+    | _ -> if xs = ys then () else lemma_boolean_merge xs ys
 
 let rec lemma_boolean_premises (ps:list checked_fact)
   : Lemma (requires scopes_wf ps)

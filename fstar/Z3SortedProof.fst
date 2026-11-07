@@ -479,19 +479,28 @@ let rec lemma_truth_member (#base:sort -> Type0) (s:S.checked_schema) (bc:S.bool
           (decreases es) =
   match es with [] -> () | x :: rest -> if x <> e then lemma_truth_member s bc eq other rest e
 
-let rec lemma_hypothesis_union (#base:sort -> Type0) (s:S.checked_schema) (bc:S.boolean_carrier base)
+let rec lemma_hypothesis_merge (#base:sort -> Type0) (s:S.checked_schema) (bc:S.boolean_carrier base)
                                (eq:T.scalar_equality base) (other:V.interpretation base (S.signature s))
                                (xs ys:list expr)
-  : Lemma (requires T.truths s bc eq other (U.add_hypotheses xs ys))
+  : Lemma (requires T.truths s bc eq other (U.merge_hypotheses xs ys))
           (ensures T.truths s bc eq other xs /\ T.truths s bc eq other ys)
           (decreases xs) =
   match xs with
   | [] -> ()
   | x :: rest ->
     if L.mem x ys then (
-      lemma_hypothesis_union s bc eq other rest ys;
+      lemma_hypothesis_merge s bc eq other rest ys;
       lemma_truth_member s bc eq other ys x)
-    else lemma_hypothesis_union s bc eq other rest (x :: ys)
+    else lemma_hypothesis_merge s bc eq other rest (x :: ys)
+
+let lemma_hypothesis_union (#base:sort -> Type0) (s:S.checked_schema) (bc:S.boolean_carrier base)
+                           (eq:T.scalar_equality base) (other:V.interpretation base (S.signature s))
+                           (xs ys:list expr)
+  : Lemma (requires T.truths s bc eq other (U.add_hypotheses xs ys))
+          (ensures T.truths s bc eq other xs /\ T.truths s bc eq other ys) =
+  match ys with
+  | [] -> ()
+  | _ -> if xs = ys then () else lemma_hypothesis_merge s bc eq other xs ys
 
 let rec lemma_premise_hypotheses (#base:sort -> Type0) (s:S.checked_schema) (bc:S.boolean_carrier base)
                                  (eq:T.scalar_equality base) (other:V.interpretation base (S.signature s))
@@ -551,14 +560,21 @@ let lemma_step (node:U.proof_node) : bool =
   node.kind = U.LemmaRule &&
   (match node.premises with [p] -> p.conclusion = U.Holds R.false_expr | _ -> false)
 
-let rec lemma_context_union (s:S.checked_schema) (xs ys:list expr)
+let rec lemma_context_merge (s:S.checked_schema) (xs ys:list expr)
   : Lemma (requires boolean_expressions s xs /\ boolean_expressions s ys)
-          (ensures boolean_expressions s (U.add_hypotheses xs ys))
+          (ensures boolean_expressions s (U.merge_hypotheses xs ys))
           (decreases xs) =
   match xs with
   | [] -> ()
   | x :: rest ->
-    lemma_context_union s rest (if L.mem x ys then ys else x :: ys)
+    lemma_context_merge s rest (if L.mem x ys then ys else x :: ys)
+
+let lemma_context_union (s:S.checked_schema) (xs ys:list expr)
+  : Lemma (requires boolean_expressions s xs /\ boolean_expressions s ys)
+          (ensures boolean_expressions s (U.add_hypotheses xs ys)) =
+  match ys with
+  | [] -> ()
+  | _ -> if xs = ys then () else lemma_context_merge s xs ys
 
 let rec lemma_premise_context (s:S.checked_schema) (ps:list U.checked_fact)
   : Lemma (requires facts_valid s ps)

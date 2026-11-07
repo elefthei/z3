@@ -909,6 +909,43 @@ The 23 targeted rule/pulling/negative-NNF examples still all `ACCEPT`.
 The pinned 17-file corpus remains 16 `ACCEPT` and one solver `UNKNOWN`
 (`lra_lassoranker.smt2` at 10 seconds), with no partials or errors.
 
+#### Hypothesis contexts and 4-ary index tries (2026-11-06)
+
+The profile of QF_UF `QG-classification/qg5/gensys_icl588.smt2`
+(1,054,967 proof nodes) showed that the per-node bookkeeping cost more
+than the rule checks. `premise_hypotheses` took 5.5 s of 15.9 s of
+instrumented checking: `add_hypotheses xs []` re-inserted a single
+parent's context one element at a time, with a quadratic `mem` scan.
+Proof-cache `index_find`/`index_put` on the binary trie took another
+4.2 s, because of 20 levels of unbounded-integer `%`/`/` per access.
+
+- `Z3UnifiedProof.add_hypotheses` now returns `xs` when `ys = []`, and
+  `ys` when `xs = ys`. Otherwise it uses the previous quadratic merge,
+  which is now named `merge_hypotheses`. Hypothesis contexts are only
+  read as conjunctions and checked for emptiness, so the different
+  element order does not change any verdict.
+  `lemma_add_hypotheses_sound`/`lemma_boolean_union` and the sorted
+  kernel's `lemma_hypothesis_union`/`lemma_context_union` are reproved
+  for the new definition; the merge lemmas keep their earlier proofs.
+- `Z3ProofIndex.index_tree` is now a 4-ary trie. Key `k > 0` continues
+  in child `(k - 1) % 4` with key `(k - 1) / 4`. Its API and
+  `lemma_index_put` are unchanged, and `child`,
+  `lemma_index_get_child` and `lemma_index_put_child` support the new
+  proof. The same trie also serves marshaling caches and `Z3ProofSet`.
+- The final `check_node_with_membership` branch evaluates
+  `relational_step || logical_step` directly. The node guard has already
+  established the well-formedness conjuncts of `check_step`, so the
+  existing soundness proof goes through unchanged.
+
+Three alternating runs of uninstrumented binaries (baseline `b188ff772`
+and this change) on that input gave `check_ms` 13,247 / 13,214 / 13,435
+before and 6,803 / 6,818 / 6,797 after. `marshal_ms` went from about
+12.7 s to 7.5 s and `--diagnostics` from 13.4 s to 6.6 s; the verdict
+stays `ACCEPT`. Both binaries were also run with `--diagnostics` on all
+242 pinned inputs, 12 at a time. Verdicts and obligation-family rows
+agreed on every input, and summed `check_ms` went from 184.1 s to
+127.4 s.
+
 ### Definition-expansion memory diagnostics (2026-10-18)
 
 The first complete local replay of the published 225-input sample retained
