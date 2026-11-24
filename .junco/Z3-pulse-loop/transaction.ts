@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { certify, type Request } from './certification.ts';
 import type { Claim } from './claims.ts';
-import { atomicJson, check, digest, emptyBlock, oid, parts, Publisher, type Binding, type Parent } from './publication.ts';
+import { atomicJson, branchName, check, digest, emptyBlock, oid, parts, Publisher, type Binding, type Parent } from './publication.ts';
 import { current, StateConflict, type LocalResult, type Paths } from './state.ts';
 
 const corpusPin = '91c60596fd6a43de189a1ccba8080a3b48797537';
@@ -16,11 +16,11 @@ const exists = (path: string) => lstat(path).then(() => true, (e: NodeJS.ErrnoEx
 const publicRef = (n: number, c: string) => `refs/pulse/public/${n}/${oid(c)}`;
 const privateRef = (n: number) => `refs/pulse/private/${n}`;
 const parentRef = (h: string, m: string) => `refs/pulse/parents/${oid(h)}/${oid(m)}`;
-const reqDigest = (r: Request) => digest(JSON.stringify([r.pr,r.iteration,r.H,r.M,r.P,r.privateCommit,r.tree,r.patchHash,r.itemId,r.beforeOut,r.beforeHash,r.afterHash,r.evaluator]));
+const reqDigest = (r: Request) => digest(JSON.stringify([r.pr,r.iteration,r.H,r.M,r.P,r.privateCommit,r.tree,r.patchHash,r.itemId,r.beforeOut,r.beforeHash,r.afterHash,r.evaluator,...(r.pr===null?[r.branch]:[])]));
 
 type Verify = typeof certify;
 export type Receipt = {
-  version:1; pr:number; url:string; iteration:number; privateParent:string; privateTree:string; privateCommit:string;
+  version:1; pr:number|null; branch?:typeof branchName; url:string; iteration:number; privateParent:string; privateTree:string; privateCommit:string;
   publicParent:string; tree:string; publicCommit:string; expectedHead:string; upstream:string; checkedOfficial:string; checkedAt:string; movements:number;
   requestDigest:string; previousBlockDigest:string; blockDigest:string; evaluator:string; evidence:string; scope:string; corpus:string;
   beforeOut:string; afterOut:string; beforeHash:string; afterHash:string; claims:Claim[];
@@ -61,6 +61,7 @@ async function inventory(dir:string, expected:string, signal?:AbortSignal) {
 
 function shape(r:Request, pub:Publisher, n:number, p:Paths) {
   check(r && r.pr === pub.pr && Number.isSafeInteger(n) && n>0 && r.iteration===n && r.itemId && typeof r.itemId==='string', 'Invalid publication request identity');
+  check(r.branch===(pub.pr===null?branchName:undefined),'Wrong publication request destination');
   for(const id of [r.H,r.M,r.P,r.privateCommit,r.tree]) oid(id);
   check([r.patchHash,r.evaluator,r.beforeHash,r.afterHash].every(sha256), 'Invalid publication evidence hashes');
   check(typeof r.beforeOut==='string' && dirname(r.beforeOut)===join(p.state,'baseline',r.P,r.evaluator) && /^attempt-[a-zA-Z0-9]+$/.test(basename(r.beforeOut)), 'Unbound baseline evidence directory');
@@ -95,7 +96,8 @@ const pathURL = (s:string) => s.split('/').map(p=>encodeURIComponent(p).replace(
 const code = (s:string) => { const fence='`'.repeat(1+Math.max(0,...Array.from(s.matchAll(/`+/g),m=>m[0].length))); return fence.length===1 ? `\`${s}\`` : `${fence} ${s} ${fence}`; };
 const sorted = (claims:Claim[]) => [...claims].sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:a.key<b.key?-1:a.key>b.key?1:0);
 function block(pub:Publisher,c:string,claims:Claim[],previous:string) {
-  const links=`[PR #${pub.pr}](${pub.url}) · [verified update](${pub.url}/commits/${oid(c)})`;
+  if(pub.pr===null) {check(previous==='' && claims.length===0,'Branch-only publications cannot contain claim rows or a managed block');return '';}
+  const links=`[PR #${pub.pr}](${pub.url}) · [verified update](${pub.commitUrl(c)})`;
   const rows=sorted(claims).map(q=>q.kind==='formula'
     ? `- The native checker certified the proof for ${code(q.path)}. [input](https://github.com/Z3Prover/z3test/blob/${corpusPin}/${pathURL(q.path)}) · ${links}`
     : `- F* checked ${code(q.name)} under its declared assumptions. [definition](https://github.com/elefthei/z3/blob/${c}/${pathURL(q.path)}#L${q.line}) · ${links}`);
@@ -109,11 +111,14 @@ function bodyFor(body:string,previous:string,target:string,repair=false) {
   check(parts(result).block===target,'Claim text collides with managed block markers');
   check(result.length<=65_536 || [...result].length<=65_536,'Proposed PR body exceeds 65,536 characters');return result;
 }
-function message(x:Pick<Receipt,'iteration'|'url'|'publicParent'|'tree'|'upstream'|'scope'|'corpus'|'evaluator'|'evidence'|'claims'>) {
-  const rows=sorted(x.claims);
-  const rowHash=digest(JSON.stringify(rows.map(q=>q.kind==='formula'?[q.kind,q.key,q.path,q.sha256]:[q.kind,q.key,q.name,q.path,q.line,q.type])));
-  const claims=rows.map(q=>q.kind==='formula'?`Certified formula: ${pathURL(q.path)} sha256:${q.sha256}`:`Checked F* lemma: ${q.name} type-sha256:${digest(q.type!)}`);
-  return [`Pulse: apply verified checker change (iteration ${x.iteration})`, '', `PR: ${x.url}`, `Parent: ${x.publicParent}`, `Tree: ${x.tree}`, `Official master: ${x.upstream}`, 'Verifier: F* v2026.10.25, full OCaml checker and native tests', `Evaluator SHA-256: ${x.evaluator}`, `Scope SHA-256: ${x.scope}`, `Corpus: Z3Prover/z3test@${x.corpus}; 17 proofs + 225 SMT-LIB sample cases`, 'Outcome: selected improvement verified; green candidate build and 242/242 cases evaluated', `Evidence SHA-256: ${x.evidence}`, `Certified rows SHA-256: ${rowHash}`, ...claims].join('\n');
+function message(x:Pick<Receipt,'pr'|'iteration'|'url'|'publicParent'|'tree'|'upstream'|'scope'|'corpus'|'evaluator'|'evidence'|'claims'>) {
+  const target=x.pr===null ? `Branch: ${x.url} refs/heads/${branchName}` : `PR: ${x.url}`;
+  const text=[`Pulse: apply verified checker change (iteration ${x.iteration})`, '', target, `Parent: ${x.publicParent}`, `Tree: ${x.tree}`, `Official master: ${x.upstream}`, 'Verifier: F* v2026.10.25, full OCaml checker and native tests', `Evaluator SHA-256: ${x.evaluator}`, `Scope SHA-256: ${x.scope}`, `Corpus: Z3Prover/z3test@${x.corpus}; 17 proofs + 225 SMT-LIB sample cases`, 'Outcome: selected improvement verified; green candidate build and 242/242 cases evaluated', `Evidence SHA-256: ${x.evidence}`];
+  if(x.pr!==null) {
+    const rows=sorted(x.claims),rowHash=digest(JSON.stringify(rows.map(q=>q.kind==='formula'?[q.kind,q.key,q.path,q.sha256]:[q.kind,q.key,q.name,q.path,q.line,q.type])));
+    text.push(`Certified rows SHA-256: ${rowHash}`,...rows.map(q=>q.kind==='formula'?`Certified formula: ${pathURL(q.path)} sha256:${q.sha256}`:`Checked F* lemma: ${q.name} type-sha256:${digest(q.type!)}`));
+  }
+  return text.join('\n');
 }
 async function pin(pub:Publisher,ref:string,commit:string,signal?:AbortSignal) {
   const old=await pub.text(['for-each-ref','--format=%(objectname)',ref],pub.repo,signal);
@@ -125,12 +130,13 @@ async function verifyCommit(pub:Publisher,t:Receipt,signal?:AbortSignal) {
   for(const id of [t.publicParent,t.tree,t.publicCommit,t.privateParent,t.privateTree,t.privateCommit,t.expectedHead,t.upstream,t.checkedOfficial]) oid(id);
   check(t.corpus===corpusPin && [t.requestDigest,t.previousBlockDigest,t.blockDigest,t.evaluator,t.evidence,t.scope,t.beforeHash,t.afterHash].every(sha256),'Invalid publication journal hashes');
   checkClaims(t.claims,[]);
+  check(t.branch===(pub.pr===null?branchName:undefined) && (pub.pr!==null || (t.claims.length===0 && t.previousBlockDigest===digest('') && t.blockDigest===digest(''))),'Wrong journal destination or unexpected branch claim ledger');
   const proof=await pub.text(['show','-s','--format=%P%n%T%n%B',publicRef(t.iteration,t.publicCommit)],pub.repo,signal);
   check(proof===`${t.publicParent}\n${t.tree}\n${message(t)}` && await pub.text(['rev-parse','--verify',publicRef(t.iteration,t.publicCommit)])===t.publicCommit && await pub.text(['rev-parse','--verify',privateRef(t.iteration)])===t.privateCommit && await pub.text(['rev-parse','--verify',parentRef(t.expectedHead,t.upstream)])===t.publicParent, 'Publication journal does not match retained Git objects');
   check(await pub.text(['show','-s','--format=%P%n%T',t.privateCommit],pub.repo,signal)===`${t.privateParent}\n${t.privateTree}`,'Receipt private parent or tree differs from retained object');
 }
 async function acknowledged(pub:Publisher,p:Paths,b:Binding,signal?:AbortSignal) {
-  if(!b.iteration) {check(b.block.replaceAll('\r\n','\n')===emptyBlock,'Bootstrap binding contains unacknowledged claims');return undefined;}
+  if(!b.iteration) {check(b.block.replaceAll('\r\n','\n')===(pub.pr===null?'':emptyBlock),'Bootstrap binding contains unacknowledged claims');return undefined;}
   const x=await json<Receipt>(journal(p,b.iteration,'receipt')); await verifyCommit(pub,x,signal);
   check(x.iteration===b.iteration && x.publicCommit===b.head && x.upstream===b.upstream && x.checkedOfficial===x.upstream && digest(b.block)===x.blockDigest && block(pub,x.publicCommit,x.claims,b.block)===b.block,'Acknowledged cursor differs from its receipt');return x;
 }
@@ -165,16 +171,19 @@ async function portedTree(pub:Publisher,p:Paths,r:Request,parent:Parent,patch:Bu
 }
 async function finish(pub:Publisher,p:Paths,b:Binding,t:Receipt,signal?:AbortSignal) {
   const target=block(pub,t.publicCommit,t.claims,b.block), fresh=await pub.observed(signal);
-  check(fresh.H===t.publicCommit,'Push not established at the bound fork and PR');
+  check(fresh.H===t.publicCommit,'Push not established at the bound fork ref');
   check(current(p)===t.iteration && isDeepStrictEqual(await pub.binding(),b),'Publication cursor changed before body reconciliation');
-  const pr=await pub.pull(signal);check(pr.head.sha===t.publicCommit,'PR head changed before body update');
-  const body=bodyFor(pr.body,b.block,target,true), editing=body!==pr.body;
-  if(editing) {
-    // A lost PATCH response says nothing about the resulting body. Only the following GET can acknowledge it.
-    try { await pub.pull(signal,body); } catch { signal?.throwIfAborted(); }
-  }
-  const after=await pub.observed(signal);
-  check(after.H===t.publicCommit && (!editing || after.pr.body===body) && parts(after.pr.body).block===target,'Public head, description or claims update not confirmed; intent retained');
+  if(pub.pr!==null) {
+    const pr=await pub.pull(signal);check(pr.head.sha===t.publicCommit,'PR head changed before body update');
+    const body=bodyFor(pr.body,b.block,target,true), editing=body!==pr.body;
+    if(editing) {
+      // A lost PATCH response says nothing about the resulting body. Only the following GET can acknowledge it.
+      try { await pub.pull(signal,body); } catch { signal?.throwIfAborted(); }
+    }
+    const after=await pub.observed(signal);
+    check(after.H===t.publicCommit && (!editing || after.pr?.body===body),'Public head or description not confirmed; intent retained');
+    pub.checkBlock(after.pr,target);
+  } else pub.checkBlock(fresh.pr,target);
   const receiptPath=journal(p,t.iteration,'receipt');
   if(await exists(receiptPath)) check(isDeepStrictEqual(await json(receiptPath),t),'Conflicting existing publication receipt');
   else await atomicJson(receiptPath,t);
@@ -187,7 +196,7 @@ async function transact(pub:Publisher,p:Paths,r:Request,resuming:boolean,signal:
   const b=await pub.binding(), patch=await guard(pub,p,r,signal), last=await acknowledged(pub,p,b,signal), prior=last?.claims??[];
   if(last && r.iteration===b.iteration) {
     check(last.requestDigest===reqDigest(r),'Wrong request for completed publication');const remote=await pub.observed(signal);
-    check(remote.H===b.head && parts(remote.pr.body).block===b.block,'Completed publication no longer matches PR');return last;
+    check(remote.H===b.head,'Completed publication no longer matches fork ref');pub.checkBlock(remote.pr,b.block);return last;
   }
   check(r.iteration>b.iteration && r.H===b.head, 'Stale fork lease or publication iteration');
   const intentPath=journal(p,r.iteration,'intent');
@@ -198,10 +207,11 @@ async function transact(pub:Publisher,p:Paths,r:Request,resuming:boolean,signal:
   const recorded=await exists(receiptPath); if(recorded) check(previous && isDeepStrictEqual(await json(receiptPath),previous),'Receipt without matching authorized intent');
   const remote=await pub.observed(signal);
   if(previous && remote.H===previous.publicCommit) {
-    check(previous.checkedOfficial===previous.upstream && (!recorded || digest(parts(remote.pr.body).block)===previous.blockDigest),'Observed head or claims conflict with publication checkpoint');
+    check(previous.checkedOfficial===previous.upstream,'Observed head conflicts with publication checkpoint');
+    if(recorded) pub.checkBlock(remote.pr,block(pub,previous.publicCommit,previous.claims,b.block));
     return finish(pub,p,b,previous,signal);
   }
-  check(!recorded && remote.H===r.H && parts(remote.pr.body).block===b.block,'Unacknowledged head or managed PR block changed');
+  check(!recorded && remote.H===r.H,'Unacknowledged fork head changed');pub.checkBlock(remote.pr,b.block);
   await pub.git(['fetch','--no-tags','--no-recurse-submodules','--',p.worktree,r.privateCommit],pub.repo,undefined,signal);
   await pin(pub,privateRef(r.iteration),r.privateCommit,signal);
   let seen=previous?.checkedOfficial??r.M, movements=Number(seen!==r.M);
@@ -226,21 +236,25 @@ async function transact(pub:Publisher,p:Paths,r:Request,resuming:boolean,signal:
     const v=await verify(pub,p,r,parent,prior,signal);signal?.throwIfAborted();
     check(v.tree===expected && v.corpus===corpusPin && [v.evaluator,v.evidence,v.scope].every(sha256),'Verifier returned another tree or invalid attestation');
     checkClaims(v.claims,prior);
+    check(pub.pr!==null || v.claims.length===0,'Branch-only verification cannot publish claim rows');
     const {beforeOut,afterOut}=v;bindOutputs(p,r,parent,beforeOut,afterOut);
     const beforeHash=beforeOut===r.beforeOut?r.beforeHash:digest(await bytes(join(beforeOut,'evidence.json'))), afterHash=beforeOut===r.beforeOut?r.afterHash:digest(await bytes(join(afterOut,'evidence.json')));
     if(beforeOut!==r.beforeOut) {await inventory(beforeOut,beforeHash,signal);await inventory(afterOut,afterHash,signal);}
     else check(v.evaluator===r.evaluator,'Original evaluation was not run with this verifier');
     check(v.evidence===digest(JSON.stringify({before:beforeHash,after:afterHash,claims:v.claims})), 'Verifier receipt differs from paired inventories and claim rows');
-    const info={version:1 as const,pr:r.pr,url:pub.url,iteration:r.iteration,privateTree:r.tree,privateCommit:r.privateCommit,privateParent:r.P,publicParent:parent.P,tree:v.tree,expectedHead:r.H,upstream:parent.M,requestDigest:reqDigest(r),previousBlockDigest:digest(b.block),claims:v.claims,scope:v.scope,corpus:v.corpus,evaluator:v.evaluator,evidence:v.evidence,beforeOut,afterOut,beforeHash,afterHash,movements};
+    const info={version:1 as const,pr:r.pr,...(r.pr===null?{branch:branchName} as const:{}),url:pub.url,iteration:r.iteration,privateTree:r.tree,privateCommit:r.privateCommit,privateParent:r.P,publicParent:parent.P,tree:v.tree,expectedHead:r.H,upstream:parent.M,requestDigest:reqDigest(r),previousBlockDigest:digest(b.block),claims:v.claims,scope:v.scope,corpus:v.corpus,evaluator:v.evaluator,evidence:v.evidence,beforeOut,afterOut,beforeHash,afterHash,movements};
     const text=message(info), C=previous && message(previous)===text ? previous.publicCommit : oid((await pub.git(['commit-tree',v.tree,'-p',parent.P],pub.repo,`${text}\n`,signal)).toString().trim());
     check(C!==r.privateCommit && await pub.text(['show','-s','--format=%P%n%T%n%B',C])===`${parent.P}\n${v.tree}\n${text}`,'Public commit does not match certified parent, tree and receipt');
     await pin(pub,publicRef(r.iteration,C),C,signal);
     check(current(p)===r.iteration && isDeepStrictEqual(await pub.binding(),b) && isDeepStrictEqual(await json(journal(p,r.iteration,'request')),r),'Publication authority changed during verification');
-    const target=block(pub,C,v.claims,b.block), pull=await pub.pull(signal);
-    check(pull.head.sha===r.H,'Fork head changed before intent');bodyFor(pull.body,b.block,target);
+    const target=block(pub,C,v.claims,b.block);
+    if(pub.pr!==null) {
+      const pull=await pub.pull(signal);check(pull.head.sha===r.H,'Fork head changed before intent');bodyFor(pull.body,b.block,target);
+    }
     const intent:Intent={...info,publicCommit:C,blockDigest:digest(target),checkedOfficial:parent.M,checkedAt:preparedAt};
     await atomicJson(intentPath,intent);previous=intent;
-    const final=await pub.observed(signal);check(final.H===r.H,'Fork lease changed before push');bodyFor(final.pr.body,b.block,target);
+    const final=await pub.observed(signal);check(final.H===r.H,'Fork lease changed before push');
+    if(final.pr!==null) bodyFor(final.pr.body,b.block,target);else pub.checkBlock(final.pr,b.block);
     if(final.M!==parent.M) {await observeTrunk(final.M,final.checkedAt);continue;}
     intent.checkedAt=final.checkedAt;await atomicJson(intentPath,intent);
     signal?.throwIfAborted();
@@ -276,6 +290,6 @@ export async function reconcile(pub:Publisher,p:Paths,signal?:AbortSignal,verify
       check(i===n && result.ciPass===true && requested && authorized,'Accepted private change lacks Leader authorization; preserve request and resume explicitly');
       await transact(pub,p,await json<Request>(journal(p,i,'request')),true,signal,verify);return;
     }
-    const remote=await pub.observed(signal);check(remote.H===b.head && parts(remote.pr.body).block===b.block,'Observed fork or PR claims differ from acknowledged cursor');
+    const remote=await pub.observed(signal);check(remote.H===b.head,'Observed fork ref differs from acknowledged cursor');pub.checkBlock(remote.pr,b.block);
   } catch(e){fail(e);}
 }

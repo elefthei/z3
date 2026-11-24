@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schedules, syntax } from 'junco';
 import { type Analysis, analyticsMarkdown, judge, metrics, pickItem, refreshQueue } from './evaluation.ts';
-import { ladder, makePublishTool, openCollection, parseMode } from './wf.ts';
+import { ladder, makePublishTool, openCollection, parkCampaign, parseMode } from './wf.ts';
 import { checkPublisherParent } from './publication.check.ts';
 import { checkPublication } from './publication.integration.check.ts';
 import { checkClaims } from './claims.check.ts';
@@ -21,6 +21,19 @@ assert.equal(parseMode(['--allow-paid','--publish-pr=7'],true),undefined);
 assert.equal(parseMode(['--allow-paid','--publish-pr=7'],false)?.pr,7);
 assert.equal(parseMode(['--allow-paid'],false)?.pr,undefined);
 const recovery = '--recover-proof-pr=7', paid = '--allow-paid';
+const branch = '--publish-branch=feat/fstar-proofs-junco';
+const stop = new AbortController(), parkedEvents: string[] = [];
+let stopped = false;
+const parked = parkCampaign('fixture conflict', {
+  record: event => { if (event.kind === 'probe') parkedEvents.push(String(event.edgeId)); },
+  flush: async () => { parkedEvents.push('flush'); },
+},stop.signal).then(() => { stopped = true; });
+await Promise.resolve();
+assert.deepEqual(parkedEvents,['campaign_parked','flush']); assert.equal(stopped,false);
+stop.abort(); await parked; assert.equal(stopped,true);
+assert.equal(parseMode([paid,branch],false)?.branch,true);
+assert.equal(parseMode([paid,branch],true),undefined);
+for (const args of [[branch],[paid,branch,branch],[paid,branch,recovery],[paid,branch,'--publish-pr=7'],[paid,branch,'--once'],[paid,branch,'--prepare'],[paid,'--publish-branch=master'],[paid,'--publish-branch=']]) assert.equal(parseMode(args,false),undefined);
 for (const args of [[recovery],[paid,'--recover-proof-pr'],[paid,'--recover-proof-pr='],[paid,'--recover-proof-pr=0'],[paid,'--recover-proof-pr=07'],[paid,'--recover-proof-pr=-7'],[paid,'--recover-proof-pr=9007199254740992'],[paid,recovery,recovery],[paid,recovery,'--recover-proof-pr=8'],[paid,recovery,'--publish-pr=7'],[paid,recovery,'--once'],[paid,recovery,'--prepare'],[paid,recovery,'--unknown']]) assert.equal(parseMode(args,false),undefined);
 assert.equal(parseMode([paid,recovery],true),undefined);
 assert.deepEqual(parseMode([paid,recovery],false),{pr:undefined,prepareOnly:false,once:false,recoverPr:7});

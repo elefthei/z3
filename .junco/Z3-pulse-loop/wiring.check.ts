@@ -39,19 +39,25 @@ function toolResult(messages: readonly Message[], id: string, error: boolean) {
 }
 process.umask(0o077);
 const collection = await tools.ToolCollection.create(cwd,{bash:{commandPrefix:'ulimit -t 1800',spawnHook:() => { throw Error('No shell calls in the offline wiring check'); }}});
-let closeFixture: (() => Promise<void>) | undefined;
 try {
-  const fixture = await acceptedGraphFixture();
-  closeFixture = fixture.close;
+  for (const branchOnly of [false,true]) await checkGraph(branchOnly);
+} finally { await collection.close(); }
+
+async function checkGraph(branchOnly: boolean) {
+  const fixture = await acceptedGraphFixture(branchOnly);
+  try {
   const {f} = fixture;
   const p = fixture.context.paths, signal = new AbortController().signal;
   const baseParent = await recoveryParent(p,f.pub,signal), n = current(p);
   const head = f.head(), body = f.data.body, writes = f.calls.writes, ref = f.git(p.worktree,'rev-parse','HEAD');
-  f.data.state = 'closed';
-  try { await assert.rejects(recoveryParent(p,f.pub,signal), /PR authority/); }
-  finally { f.data.state = 'open'; }
+  if (!branchOnly) {
+    f.data.state = 'closed';
+    try { await assert.rejects(recoveryParent(p,f.pub,signal), /PR authority/); }
+    finally { f.data.state = 'open'; }
+  }
   const old = 'let next = fuel - 1 in', proposal = JSON.stringify({old,replacement:'let next : nat = fuel - 1 in'});
   for (const mode of ['verified','duplicate','rejected','blank','tool-call','short-length','provider-error','stale-parent'] as const) {
+    if (branchOnly && mode !== 'verified') continue;
     const parent = baseParent, dir = join(p.state,'proof-recovery-fixture',mode === 'duplicate' ? 'verified' : mode);
     const r: Recovery = {...parent, pr:f.pub.pr, evaluator:'fixture', dir, out:fixture.context.beforeOut!, file:'fstar/Z3Fixture.fst', line:3, name:'Z3Fixture.prove',
       source:`let prove (fuel:nat) : Lemma True =\n  if fuel > 0 then\n    ${old} ()`, diagnostic:'F* Error 19: failed to prove: next >= 0'};
@@ -101,10 +107,11 @@ try {
   const modes = ['idle','rejected','ci-red','local-accepted','stale-feedback','blank-writer','aborted-writer','wrong-tree','missing-receipt','blank-leader','nonterminal-leader','cancelled-leader','stale-evidence','measurement','accepted','blank-after-push'] as const;
   let localIteration = 0;
   for (const mode of modes) {
+    if (branchOnly && !['idle','rejected','accepted'].includes(mode)) continue;
     const {context:seed,result:privateResult,verify} = mode === 'blank-after-push' ? await fixture.cycle() : fixture;
     const before = seed.selected!.before, item = seed.selected!.item!, verified = seed.verification!;
     const evidence = verified.report!.text;
-    const originalHead = fixture.head(), originalBody = parts(fixture.body());
+    const originalHead = fixture.head(), originalBody = fixture.body();
     const second = ['missing-receipt','blank-leader','nonterminal-leader','cancelled-leader','stale-evidence','measurement','accepted','blank-after-push'].includes(mode);
     const privateAccept = second || mode === 'wrong-tree' || mode === 'local-accepted';
     const active = mode !== 'idle' && mode !== 'stale-feedback';
@@ -195,7 +202,7 @@ try {
           assert.equal(model.id,'leader'); assert.equal(execution.graph.getNode(leaderId)!.state,originalLeader);
           assert.ok(ctx.messages.some(m=>m.role==='assistant' && contentText(m.content)===plan),'same planning session');
           const tasks = ctx.messages.flatMap(m=>m.role==='user'?[contentText(m.content)]:[]);
-          assert.ok(tasks.at(-1)?.includes(`verified iteration ${iteration} of PR #${f.pub.pr}`));
+          assert.ok(tasks.at(-1)?.includes(`verified iteration ${iteration} for ${f.pub.url}`));
           const stillPlanning = execution.graph.result(leaderId);
           assert.ok(stillPlanning._tag==='Some' && stillPlanning.value === planning);
           assert.equal(execution.graph.available().has(recordId),false,'Record cannot consume the stale planning return');
@@ -215,17 +222,17 @@ try {
           assert.deepEqual(io(),priorIO); events.push('denied'); return fauxAssistantMessage('No receipt.');
         });
         if (mode==='blank-after-push') script.push(ctx=>{
-          assert.equal(toolResult(ctx.messages,'publish',false), `${f.pub.url}/commits/${fixture.head()}`);
+          assert.equal(toolResult(ctx.messages,'publish',false), f.pub.commitUrl(fixture.head()));
           events.push('published'); return fauxAssistantMessage('  ');
         });
         if (mode==='accepted') {
           let updated: number[];
           script.push(ctx=>{
-            assert.equal(toolResult(ctx.messages,'publish',false), `${f.pub.url}/commits/${fixture.head()}`);
+            assert.equal(toolResult(ctx.messages,'publish',false), f.pub.commitUrl(fixture.head()));
             updated = io(); events.push('published'); return call('duplicate');
           },ctx=>{
             const text = toolResult(ctx.messages,'duplicate',false);
-            assert.equal(text,`${f.pub.url}/commits/${fixture.head()}`); assert.deepEqual(io(),updated);
+            assert.equal(text,f.pub.commitUrl(fixture.head())); assert.deepEqual(io(),updated);
             events.push('duplicate'); return fauxAssistantMessage(text);
           });
         }
@@ -258,12 +265,20 @@ try {
           const ret=execution.graph.result(n); assert.ok(ret._tag==='Some' && ret.value===result);
         }
         if(mode==='accepted'){
-          const h=fixture.head(),body=parts(fixture.body());
+          const h=fixture.head();
           assert.notEqual(h,originalHead); assert.notEqual(h,result.commit);
           assert.equal(f.git(f.fork,'rev-parse',`${h}^`),seed.parent!.P); assert.equal(f.git(f.fork,'rev-parse',`${h}^{tree}`),seed.attempt!.tree);
-          assert.equal(body.prefix,originalBody.prefix); assert.equal(body.suffix,originalBody.suffix);
-          assert.equal(body.block.split('[PR #7]').length-1,1); assert.ok(body.block.includes(`${f.pub.url}/commits/${h}`));
-          assert.equal(f.calls.writes,priorIO[1]!+1); assert.equal(fixture.verified.length,1);
+          if (branchOnly) {
+            assert.equal(f.pub.commitUrl(h),`https://github.com/elefthei/z3/commit/${h}`);
+            assert.equal(f.git(f.fork,'rev-parse','refs/heads/feat/fstar-proofs-junco'),h);
+            assert.deepEqual(io(),[0,0]); assert.equal(fixture.body(),originalBody);
+          } else {
+            const body=parts(fixture.body()), previousBody=parts(originalBody);
+            assert.equal(body.prefix,previousBody.prefix); assert.equal(body.suffix,previousBody.suffix);
+            assert.equal(body.block.split('[PR #7]').length-1,1); assert.ok(body.block.includes(f.pub.commitUrl(h)));
+            assert.equal(f.calls.writes,priorIO[1]!+1);
+          }
+          assert.equal(fixture.verified.length,1);
         } else { assert.deepEqual(io(),priorIO); assert.equal(fixture.head(),originalHead); }
         events.push('sink');
       }
@@ -280,4 +295,5 @@ try {
       console.log(`${mode}: ${events.join(' -> ')}`);
     }finally{delete process.env.JUNCO_GRAPH_RUN_DIR; await execution.graph.close();}
   }
-}finally{try{await closeFixture?.();}finally{await collection.close();}}
+  } finally { await fixture.close(); }
+}

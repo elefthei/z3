@@ -34,6 +34,12 @@ After `Record` accepts a fully verified change, the same Leader can call `publis
 
 The PR body lists only newly certified pinned inputs and named F* lemmas checked under their declared assumptions. Each row links to a public commit and its source or input. A speedup can advance the PR without adding a claim. The private decision in `result.json` is not a public receipt: check `runs/<iteration>/publication/receipt.json`, the fork ref and the PR. The Git push and body edit are separate operations. Preserve a pending request or intent on exit 78; restarting must not infer authorization from an accepted local commit.
 
+### Fork branch without a PR
+
+`bun run loop --allow-paid --publish-branch=feat/fstar-proofs-junco` targets only `elefthei/z3:feat/fstar-proofs-junco`. The operator first creates that ref at the tested runner commit and initializes a separate `fstar-proofs-junco-publisher` checkout against its exact OID. Use fresh state `/btrfs/Z3-pulse-loop-fstar-proofs-junco`.
+
+Each independently accepted task gives the Leader one publication turn. The host verifies the patch and pushes with an explicit lease; there is no timer, PR, body edit, or claims list. Idle, rejected, and proof-recovery results do not push. If the run parks for review, the branch-mode frontend remains on port 3000 with its event history; no further model work is scheduled.
+
 ### Failed upstream proof
 
 A cold or rebased parent that fails F* is not a corpus improvement. `ProofRecovery` receives a failing declaration only when the host can tie the strict compiler diagnostic to the official source. If other build inputs differ from `master`, the host first reproduces the same failure on the official tree. Infrastructure failures, changed proofs and ambiguous diagnostics do not trigger a repair.

@@ -2,11 +2,11 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath } from 'node:fs/prom
 import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { evaluatorIdentity, regress, validateScope } from './evaluation.ts';
-import { Publisher, type Parent, atomicJson, check, digest, oid, parts } from './publication.ts';
+import { Publisher, type Parent, atomicJson, check, digest, oid } from './publication.ts';
 import { current, type Paths } from './state.ts';
 import { recoveryLemma } from './recovery-verify.ts';
 
-export type Recovery = Parent & {pr:number;evaluator:string;out:string;dir:string;file:string;line:number;name:string;source:string;diagnostic:string};
+export type Recovery = Parent & {pr:number|null;evaluator:string;out:string;dir:string;file:string;line:number;name:string;source:string;diagnostic:string};
 const exists=(path:string)=>lstat(path).then(()=>true,(e:NodeJS.ErrnoException)=>{if(e.code!=='ENOENT')throw e;return false;});
 async function bytes(path:string){check(await realpath(path)===path && (await lstat(path)).isFile(),'Recovery evidence path is aliased or not a file');return readFile(path);}
 const json=async(path:string)=>JSON.parse((await bytes(path)).toString());
@@ -90,7 +90,8 @@ export async function recoveryInput(p:Paths,pub:Publisher,t:Parent,out:string|un
     const official=await failure(pub,e,t.M,t.M,mid);check(official.name===selected.name && official.diagnostic===selected.diagnostic,'Official trunk does not reproduce the same proof failure');
   }
   const now=await pub.observed(signal);
-  check(now.H===t.H && now.M===t.M && parts(now.pr.body).block===bind.block && isDeepStrictEqual(await pub.binding(),bind),'PR changed during failure diagnosis; no recovery turn');
+  pub.checkBlock(now.pr,bind.block);
+  check(now.H===t.H && now.M===t.M && isDeepStrictEqual(await pub.binding(),bind),'Publication binding changed during failure diagnosis; no recovery turn');
   return selected;
 }
 export async function beginRecovery(r:Recovery){

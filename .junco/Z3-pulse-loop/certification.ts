@@ -4,11 +4,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { analyze, evaluatorIdentity, judge, prCandidateFailure, refreshQueue, regress, validatePatch } from './evaluation.ts';
 import { extractClaims, type Claim } from './claims.ts';
 import { current, type Paths } from './state.ts';
-import { Publisher, type Parent, atomicJson, check, digest, oid } from './publication.ts';
+import { Publisher, type Parent, atomicJson, branchName, check, digest, oid } from './publication.ts';
 import { rememberRebaseFailure } from './recovery.ts';
 import type { Loop } from './wf.ts';
 
-export type Request={pr:number;iteration:number;H:string;M:string;P:string;privateCommit:string;tree:string;patchHash:string;itemId:string;beforeOut:string;beforeHash:string;afterHash:string;evaluator:string};
+export type Request={pr:number|null;branch?:typeof branchName;iteration:number;H:string;M:string;P:string;privateCommit:string;tree:string;patchHash:string;itemId:string;beforeOut:string;beforeHash:string;afterHash:string;evaluator:string};
 const sha256=(s:string|undefined):s is string=>typeof s==='string' && /^[0-9a-f]{64}$/.test(s);
 const corpus='91c60596fd6a43de189a1ccba8080a3b48797537';
 const artifact=async(dir:string,file:string)=>{const path=join(dir,file);check(await realpath(path)===path,'Evidence path is not canonical');return readFile(path);};
@@ -27,7 +27,7 @@ export async function requestPublication(x:Loop,signal?:AbortSignal):Promise<Req
   const exact=await pub.git(['diff','--binary','--full-index','--no-ext-diff','--no-textconv',r.base,r.commit,'--'],p.worktree,undefined,signal);
   check(exact.equals(bytes),'Private commit differs from independently verified patch');
   check(dirname(x.beforeOut)===join(p.state,'baseline',r.base,b.evaluator) && /^attempt-[A-Za-z0-9]+$/.test(basename(x.beforeOut)) && digest(await artifact(x.beforeOut,'evidence.json'))===b.evidenceSha256 && digest(await artifact(join(dir,'after'),'evidence.json'))===after.evidenceSha256,'Evidence manifest changed or outside run');
-  const request={pr:pub.pr,iteration:r.iteration,...parent,privateCommit:r.commit,tree:a.tree,patchHash:a.hash,itemId:r.item,beforeOut:x.beforeOut,beforeHash:b.evidenceSha256,afterHash:after.evidenceSha256,evaluator:b.evaluator};
+  const request:Request={pr:pub.pr,...(pub.pr===null && {branch:branchName}),iteration:r.iteration,...parent,privateCommit:r.commit,tree:a.tree,patchHash:a.hash,itemId:r.item,beforeOut:x.beforeOut,beforeHash:b.evidenceSha256,afterHash:after.evidenceSha256,evaluator:b.evaluator};
   const out=join(dir,'publication');await mkdir(out,{mode:0o700});await atomicJson(join(out,'request.json'),request);return Object.freeze(request);
 }
 
@@ -55,7 +55,7 @@ export async function certify(pub:Publisher,p:Paths,r:Request,parent:Parent,prio
   if(reuse)check(before.evidenceSha256===r.beforeHash && after.evidenceSha256===r.afterHash,'Original verification evidence no longer matches');
   const item=refreshQueue({items:[]},before).items.find(i=>i.id===r.itemId),failure=prCandidateFailure(after);
   check(!failure,failure??'Invalid candidate');check(item && judge(item,before,after).ok,'Verified work item obsolete or no longer an improvement');
-  const claims=await extractClaims({p:right,parent:parent.P,tree,beforeOut,afterOut,before,after},prior,signal);
+  const claims=pub.pr===null?[]:await extractClaims({p:right,parent:parent.P,tree,beforeOut,afterOut,before,after},prior,signal);
   const build=JSON.parse((await artifact(afterOut,'build.json')).toString());check(sha256(build.scope_sha256),'Missing full scope receipt');
   // Transfer the exact tested tree through a local commit; commit-tree in the publisher supplies the public identity.
   const proof=oid((await pub.git(['-c','user.name=Pulse verifier','-c','user.email=verifier@localhost','commit-tree',tree,'-p',parent.P,'-m','Tested tree'],right.worktree)).toString().trim());

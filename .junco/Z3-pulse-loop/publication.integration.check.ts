@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { publicationFixture } from './publication.check.ts';
 import { acquire, adoptPrParent, capture, next, prepare, record, saveQueue, verificationPaths } from './state.ts';
-import { digest, parts } from './publication.ts';
+import { branchName, digest, parts } from './publication.ts';
 import { refreshQueue, validatePatch, type Analysis } from './evaluation.ts';
 import { requestPublication, type certify } from './certification.ts';
 import { publish, reconcile } from './transaction.ts';
@@ -16,8 +16,8 @@ const samples=[['regressions/proofs/canaries/array_axiom_log.smt2','2d0cd6240c1a
 async function evidence(dir:string,outcome:string){await mkdir(dir,{recursive:true,mode:0o700});await writeFile(join(dir,'outcome.txt'),outcome);const manifest=JSON.stringify({'outcome.txt':digest(outcome)});await writeFile(join(dir,'evidence.json'),manifest);return digest(manifest);}
 
 /** Real protected tree, archive, state.record and leases; synthetic measured verdicts, never public evidence. */
-export async function acceptedGraphFixture(){
-  const f=await publicationFixture(true),binding=await f.pub.initialize(f.first),p={...f.p,base:binding.seed,reviewedUpstream:binding.upstream};
+export async function acceptedGraphFixture(branchOnly = false){
+  const f=await publicationFixture(true,branchOnly),binding=await f.pub.initialize(f.first),p={...f.p,base:binding.seed,reviewedUpstream:binding.upstream};
   const unlock=acquire(p);let step=0;const verified:string[]=[];
   const close=async()=>{unlock();execFileSync('/usr/bin/btrfs',['subvolume','delete',p.worktree],{stdio:'pipe'});await f.close();};
   const cycle=async(performance=false)=>{
@@ -40,7 +40,11 @@ export async function acceptedGraphFixture(){
       const patch=await readFile(a.patch);assert.equal(digest(patch),r.patchHash);await pub.git(['apply','--index','--binary','-'],root,patch,signal);await validatePatch({...pp,reviewedUpstream:newParent.M},newParent.P,root);
       assert.equal(await pub.text(['ls-files','--','deny-fixture'],root),'','paired candidate no longer qualifies');
       const tree=await pub.text(['write-tree'],root),tmp=f.git(root,'commit-tree',tree,'-p',newParent.P,'-m','Fixture tested candidate');await pub.git(['fetch','--no-tags',root,tmp]);
-      const claim:Claim={kind:'formula',key:`${revision}:${target}:${hash}`,name:target,path:target,sha256:hash};const claims=performance?[...prior]:[...prior.filter(c=>c.key!==claim.key),claim];
+      let claims=prior;
+      if(!branchOnly && !performance) {
+        const claim:Claim={kind:'formula',key:`${revision}:${target}:${hash}`,name:target,path:target,sha256:hash};
+        claims=[...prior.filter(c=>c.key!==claim.key),claim];
+      }
       const changed=newParent.P!==r.P, pair=changed?await mkdtemp(join(run,'publication','pair-')):'';
       const left=changed?join(pair,'before'):beforeOut,right=changed?join(pair,'after'):join(run,'after');
       const hashes={before:changed?await evidence(left,`Baseline ${newParent.P}`):r.beforeHash,after:changed?await evidence(right,`Candidate ${tree}`):r.afterHash,claims};
@@ -69,4 +73,41 @@ export async function checkPublication(){
     const rejected=await x.cycle(),rr=await requestPublication(rejected.context);const writes=f.calls.writes;await f.advance('deny-fixture','new verdict\n');await assert.rejects(publish(f.pub,x.context.paths,rr,undefined,rejected.verify));assert.equal(f.head(),h);assert.equal(f.calls.writes,writes);
     console.log('Fixed PR: real leases and paired commits, two claims, interrupted push/PATCH repair, speed-only update and stale-evidence rejection verified offline');
   }finally{await x.close();}
+  const branch=await acceptedGraphFixture(true);try {
+    const {f,context,verify}=branch,{pub}=f,p=context.paths,r=await requestPublication(context),ref=`refs/heads/${branchName}`;
+    const otherRefs=()=>f.git(f.fork,'for-each-ref','--format=%(refname) %(objectname)').split('\n').filter(row=>!row.startsWith(ref+' '));
+    const untouched=otherRefs(),body=f.data.body,send=pub.push.bind(pub),abort=new AbortController();
+    let pushes=0;
+    pub.push=async(c,h,signal)=>{
+      pushes++;await send(c,h,signal);
+      if(pushes===1){abort.abort();throw Error('Lost acknowledgement after successful fork push');}
+    };
+    await assert.rejects(reconcile(pub,p,undefined,verify));assert.equal(pushes,0);
+    await assert.rejects(publish(pub,p,r,abort.signal,verify));
+    const dir=join(p.state,'runs',String(r.iteration),'publication'),intent=JSON.parse(await readFile(join(dir,'intent.json'),'utf8'));
+    assert.equal(f.head(),intent.publicCommit);assert.equal((await pub.binding()).head,r.H);
+    await assert.rejects(readFile(join(dir,'receipt.json')),{code:'ENOENT'});
+    await reconcile(pub,p,undefined,verify);
+    const first=await publish(pub,p,r,undefined,verify);
+    assert.deepEqual(first,intent);assert.deepEqual(JSON.parse(await readFile(join(dir,'receipt.json'),'utf8')),first);
+    assert.equal(pushes,1);assert.equal(branch.verified.length,1);assert.equal(first.pr,null);assert.equal(first.branch,branchName);
+    assert.notEqual(first.publicCommit,r.privateCommit);assert.equal(f.git(f.fork,'show','-s','--format=%P%n%T',first.publicCommit),`${r.P}\n${r.tree}`);
+    const second=await branch.cycle(),r2=await requestPublication(second.context),latest=await f.advance('branch-trunk','advanced\n');
+    f.git(f.author,'push',`--force-with-lease=${ref}:${first.publicCommit}`,f.fork,`HEAD:${ref}`);
+    await assert.rejects(publish(pub,p,r2,undefined,second.verify));await assert.rejects(send(r2.P,r2.H));
+    assert.equal(f.head(),latest);assert.equal((await pub.binding()).head,first.publicCommit);assert.equal(pushes,1);
+    f.git(f.fork,'update-ref',ref,first.publicCommit,latest); // Restore only the fixture's simulated competing write.
+    const receipt=await publish(pub,p,r2,undefined,second.verify),tip=receipt.publicCommit;
+    assert.equal(f.head(),tip);assert.equal((await pub.binding()).head,tip);assert.equal(receipt.expectedHead,first.publicCommit);
+    assert.equal(receipt.upstream,latest);assert.notEqual(receipt.publicParent,r2.P);assert.equal(branch.verified.at(-1),receipt.publicParent);
+    assert.equal(f.git(f.fork,'show','-s','--format=%P%n%T',tip),`${receipt.publicParent}\n${receipt.tree}`);f.git(f.fork,'merge-base','--is-ancestor',latest,tip);
+    for(const n of [r.iteration,r2.iteration]) f.git(f.fork,'cat-file','-e',`${tip}:src/pulse_fixture_${n}.cpp`);
+    assert.deepEqual(receipt.claims,[]);assert.deepEqual(first.claims,[]);assert.equal((await pub.binding()).block,'');
+    assert.doesNotMatch(f.git(f.fork,'log','--format=%B',`${latest}..${tip}`),/PR:|Certified rows|Certified formula:|Checked F\* lemma:/);
+    await reconcile(pub,p,undefined,second.verify);assert.deepEqual(await publish(pub,p,r2,undefined,second.verify),receipt);
+    assert.equal(pushes,2);assert.equal(branch.verified.length,2);assert.deepEqual(otherRefs(),untouched);
+    assert.equal(f.git(f.trunk,'for-each-ref','--format=%(refname) %(objectname)'),`refs/heads/master ${latest}`);
+    assert.deepEqual([f.calls.reads,f.calls.writes,f.data.body],[0,0,body]);
+    console.log('Fixed fork branch: two verified commits, rebase, stale lease rejection and interrupted push recovery without PR access');
+  }finally{await branch.close();}
 }

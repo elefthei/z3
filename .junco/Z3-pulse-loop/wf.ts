@@ -13,7 +13,7 @@ import { JuncoFrontend } from 'junco-frontend';
 import { Type, type TArray, type TSchema } from 'typebox';
 import { analyze, analyticsMarkdown, baseline, evaluationPaths, EvaluationConfigError, metrics, pickItem, prCandidateFailure, refreshQueue, regress, sh, type Analysis, type Item, type Run } from './evaluation.ts';
 import { acquire, adoptPrParent, capture, current, next, paths, prepare, readQueue, record, saveQueue, StateConflict, verificationPaths, type Attempt, type LocalResult, type Paths } from './state.ts';
-import { Publisher, atomicJson, check, digest, oid, parts, type Parent } from './publication.ts';
+import { Publisher, atomicJson, check, digest, oid, type Parent } from './publication.ts';
 import { requestPublication, type certify, type Request } from './certification.ts';
 import { publish, reconcile, type Receipt } from './transaction.ts';
 import { beginRecovery, ensureNoRecovery, recoveryInput, type Recovery } from './recovery.ts';
@@ -313,7 +313,7 @@ export function makePublishTool(x: Loop, fixtureVerify?: typeof certify): AgentT
   check(!fixtureVerify || x.publisher?.isFixture, 'Only local fixture transports may substitute certification');
   return {
     name: 'publish_verified', label: 'Publish verified change',
-    description: 'Publish the host-verified change for the current PR task and return its receipt.',
+    description: 'Publish the host-verified change for the current publication task and return its receipt.',
     parameters: Type.Object({}, { additionalProperties: false }), replay: 'never',
     execute: async (_id, args, signal) => {
       const pub = x.publisher, permit = x.publication;
@@ -339,8 +339,8 @@ export function makePublishTool(x: Loop, fixtureVerify?: typeof certify): AgentT
           throw new StateConflict('Publication not confirmed. The host has preserved the evidence.');
         }
       }
-      const { url, publicCommit } = permit.receipt;
-      return { content: [{ type: 'text', text: `${url}/commits/${publicCommit}` }], details: undefined };
+      const { publicCommit } = permit.receipt;
+      return { content: [{ type: 'text', text: pub.commitUrl(publicCommit) }], details: undefined };
     },
   };
 }
@@ -447,7 +447,7 @@ export function regressionCycle<C extends Loop = Loop>(
         const previous = Number(batch[0]);
         const base = await measure(c, signal, previous);
         if ('P' in base) {
-          check(base.P === x.sha && base.P === x.parent?.P && base.H === x.parent.H && base.M === x.parent.M && base.pr === (x.publisher?.pr ?? x.recoveryOnly?.pr), 'Stale proof recovery binding');
+          check(base.P === x.sha && base.P === x.parent?.P && base.H === x.parent.H && base.M === x.parent.M && base.pr === (x.publisher ? x.publisher.pr : x.recoveryOnly?.pr), 'Stale proof recovery binding');
           check(verify === verifyRecovery || x.publisher?.isFixture, 'Only a local fixture may substitute repair verification');
           const node = c.graph.getNode(graph.NodeId.create('ProofRecovery'));
           check(node?.state instanceof agent.JuncoAgent && !node.state.getActiveTools().length, 'ProofRecovery requires the tool-free role');
@@ -511,6 +511,10 @@ export const Regress = regressionCycle<Loop>(async (c, signal, previous) => {
   if (current(x.paths) !== previous) throw new StateConflict('Starting iteration differs from private state');
   x.iteration = next(x.paths);
   log(`iteration ${x.iteration}: regressing ${x.sha}`);
+  if (x.publisher?.pr === null) {
+    probeAll(c, {});
+    await c.recorder?.flush();
+  }
   const base = await withRunner(c, run => baseline(x.paths, x.sha, signal, run));
   if (!x.publisher || !x.parent) return base;
   try { return await recoveryInput(x.paths,x.publisher,x.parent,base.out,signal) ?? base; }
@@ -613,7 +617,7 @@ export function recordNode(decide = record): syntax.DeterministicNode<Loop> {
         const leader = c.graph.getNode(graph.NodeId.create('Leader'));
         check(leader && leader.state instanceof agent.JuncoAgent, 'Publication requires the planning Leader');
         leader.state.stagePrompt('Carry out the verified publication task in the following host message; return the exact receipt URL from the tool.');
-        const task = graph.nodes.Task.create({ kind: 'prompt', text: `Call publish_verified for the verified iteration ${request.iteration} of PR #${request.pr}.`, spec: 'Return the confirmed publication URL.' });
+        const task = graph.nodes.Task.create({ kind: 'prompt', text: `Call publish_verified for the verified iteration ${request.iteration} for ${x.publisher.url}.`, spec: 'Return the confirmed publication URL.' });
         const permit: PublicationTurn = { request, leader, used: false };
         x.publication = permit;
         try {
@@ -624,10 +628,10 @@ export function recordNode(decide = record): syntax.DeterministicNode<Loop> {
           if (permit.failure) throw new StateConflict('Host publication failed; private evidence preserved', {cause:permit.failure});
           const receipt = permit.receipt;
           check(permit.used && receipt && receipt.pr === request.pr && receipt.iteration === result.iteration && receipt.privateCommit === result.commit && receipt.privateTree === request.tree && receipt.url === x.publisher.url, 'Missing or mismatched host publication receipt');
-          check(text.includes(`${receipt.url}/commits/${receipt.publicCommit}`), 'Leader did not return the confirmed publication URL');
+          check(text.includes(x.publisher.commitUrl(receipt.publicCommit)), 'Leader did not return the confirmed publication URL');
           const binding = await x.publisher.binding(), { H, pr } = await x.publisher.observed(signal);
-          const block = parts(pr.body).block;
-          check(H === receipt.publicCommit && H === binding.head && binding.iteration === receipt.iteration && binding.block === block && digest(block) === receipt.blockDigest, 'Acknowledged PR head or claims block changed');
+          x.publisher.checkBlock(pr,binding.block);
+          check(H === receipt.publicCommit && H === binding.head && binding.iteration === receipt.iteration && digest(binding.block) === receipt.blockDigest, 'Acknowledged PR head or claims block changed');
           await atomicJson(leaderReturn(x.paths,request.iteration), {head:H, acknowledged:true});
           return result;
         } finally { delete x.publication; }
@@ -682,7 +686,7 @@ async function terminal(execution: Execution, x: Loop, previous: number, signal:
     return { result: x.result, selected: x.selected, verification: x.verification };
   } catch (cause) {
     if (x.activeRecovery) throw new StateConflict('Private proof recovery did not finish; preserve the reservation and evidence', {cause});
-    if (x.publisher && x.result?.ok) throw new StateConflict(`Publication of iteration ${x.iteration} on PR #${x.publisher.pr} did not finish; reconcile preserved evidence`, {cause});
+    if (x.publisher && x.result?.ok) throw new StateConflict(`Publication of iteration ${x.iteration} for ${x.publisher.url} did not finish; reconcile preserved evidence`, {cause});
     throw cause;
   } finally { delete x.publication; }
 }
@@ -697,7 +701,8 @@ export async function runCycle(execution: Execution, x: Loop, previous: number, 
 export async function recoveryParent(p: Paths, pub: Publisher, signal: AbortSignal): Promise<Parent> {
   current(p); // requires the bound, initialized state lock
   const binding = await pub.binding(), {H,M,pr} = await pub.observed(signal);
-  check(pub.repo === p.repo && pub.state === p.state && binding.seed === p.base && binding.head === H && binding.block === parts(pr.body).block, 'Recovery PR binding changed');
+  check(pub.repo === p.repo && pub.state === p.state && binding.seed === p.base && binding.head === H, 'Recovery publisher binding changed');
+  pub.checkBlock(pr,binding.block);
   const P = oid(await pub.text(['rev-parse','--verify',`refs/pulse/parents/${H}/${M}^{commit}`],pub.repo,signal));
   const checkout = await pub.text(['rev-parse','--show-toplevel','--absolute-git-dir','HEAD'],pub.repo,signal);
   check(checkout === `${pub.repo}\n${join(pub.repo,'.git')}\n${P}`, 'Publisher is not at the retained proof recovery parent');
@@ -726,6 +731,11 @@ async function recoverOnce(document: syntax.JuncoDocument, p: Paths, pub: Publis
 }
 
 export function parseMode(args: string[], measuring: boolean) {
+  const branch = '--publish-branch=feat/fstar-proofs-junco';
+  if (args.includes(branch)) {
+    if (!measuring && args.length === 2 && args.includes('--allow-paid')) return {branch:true, pr:undefined, prepareOnly:false, once:false};
+    return;
+  }
   const recovery = args.find(a=>a.startsWith('--recover-proof-pr='));
   if (recovery !== undefined) {
     const match = /^--recover-proof-pr=([1-9]\d*)$/.exec(recovery), recoverPr = Number(match?.[1]);
@@ -741,9 +751,23 @@ export function parseMode(args: string[], measuring: boolean) {
   return {pr,prepareOnly,once};
 }
 
+/** Keep the frontend event history and state lock until the operator stops this service. */
+export async function parkCampaign(error: unknown, recorder: Pick<tracer.ProfileRecorder<string>, 'record'|'flush'>, signal: AbortSignal) {
+  log(`parked: ${String(error)}; no further tasks until operator restart`);
+  console.error(error);
+  try {
+    recorder.record({resource:'probe', kind:'probe', edgeId:'campaign_parked', value:1, unit:'short'});
+    await recorder.flush();
+  } catch (cause) { console.error('Parked campaign telemetry failed:', cause); }
+  if (signal.aborted) return;
+  const {promise, resolve} = Promise.withResolvers<void>();
+  signal.addEventListener('abort', () => resolve(), {once:true});
+  await promise;
+}
+
 async function main(args: string[], signal: AbortSignal) {
   const mode=parseMode(args,process.env.JUNCO_GRAPH_RUN_DIR!==undefined);
-  if (!mode) { console.error('usage: bun run wf.ts --prepare | [--once] --allow-paid | --allow-paid --publish-pr=N | --allow-paid --recover-proof-pr=N'); return 64; }
+  if (!mode) { console.error('usage: bun run wf.ts --prepare | [--once] --allow-paid | --allow-paid --publish-branch=feat/fstar-proofs-junco | --allow-paid --publish-pr=N | --allow-paid --recover-proof-pr=N'); return 64; }
   const {prepareOnly,once,pr,recoverPr}=mode;
   const failures: unknown[] = [];
   let request: GraphRun | undefined, hash = "", measured: Record<string, number> | undefined;
@@ -758,7 +782,7 @@ async function main(args: string[], signal: AbortSignal) {
     }
     const p = paths();
     const number = pr ?? recoverPr;
-    const publisher=number===undefined ? undefined : await Publisher.live(number,p);
+    const publisher=mode.branch ? await Publisher.liveBranch(p) : number===undefined ? undefined : await Publisher.live(number,p);
     if (publisher) {
       const binding = await publisher.binding();
       p.base = binding.seed;
@@ -776,9 +800,12 @@ async function main(args: string[], signal: AbortSignal) {
       await writeFile(join(p.state,'selected.json'), JSON.stringify({ item: selected.item?.id ?? null, text: selected.text, spec: SPEC, sha, out:base.out, metrics:metrics(selected.before) })+'\n');
       console.log(selected.item?.id ?? '');
     } else {
-      if (publisher) await campaignParent(p,publisher,signal);
-      else await prepare(p,signal);
-      const models = await loadLadder(signal);
+      let models;
+      if (!mode.branch) {
+        if (publisher) await campaignParent(p,publisher,signal);
+        else await prepare(p,signal);
+        models = await loadLadder(signal);
+      }
       frontend = await JuncoFrontend.listen({ host: '0.0.0.0', port: 3000 });
       const page = await fetch('http://127.0.0.1:3000/', { signal });
       if (!page.ok || !(await page.text()).includes('<html')) throw Error('Junco frontend client assets unavailable at :3000');
@@ -792,6 +819,8 @@ async function main(args: string[], signal: AbortSignal) {
       recorder = live;
       if (request) recorder = pairedRecorder(live, new tracer.JsonlRecorder({path:join(request.dir,'samples.jsonl'),costMode:'usage'}));
       log(`frontend: http://127.0.0.1:3000/ ; grafana: ${live.dashboardUrl}`);
+      if (mode.branch && publisher) await campaignParent(p,publisher,signal);
+      models ??= await loadLadder(signal);
       const monitored = cgroupDelegated();
       if (!monitored) log('cgroup v2 memory not delegated: per-pipeline memory unavailable');
       collection = await openCollection(p, monitored ? recorder : undefined);
@@ -826,7 +855,11 @@ async function main(args: string[], signal: AbortSignal) {
         running = false;
       } while (!signal.aborted);
     }
-  } catch (error) { failures.push(error); }
+  } catch (error) {
+    if (mode.branch && frontend && recorder && conflict(error) && !signal.aborted) {
+      await parkCampaign(error, recorder, signal);
+    } else failures.push(error);
+  }
   const beforeClose = failures.length;
   for (const close of [()=>collection?.close(),()=>recorder?.close(),()=>frontend?.close(),()=>unlock?.()]) {
     try { await close(); } catch (error) { failures.push(error); }

@@ -74,17 +74,20 @@ function command(cwd: string, argv: string[], signal?: AbortSignal, input?: Buff
 const git = (cwd: string, args: string[], signal?: AbortSignal, input?: Buffer) => command(cwd, [...gitArgs, ...args], signal, input);
 const text = async (cwd: string, args: string[], s?: AbortSignal) => (await git(cwd, args, s)).toString().trimEnd();
 
-function boundPr(p: Paths): { pr: number; head: string; iteration: number } | undefined {
+function boundPr(p: Paths): { pr: number | null; head: string; iteration: number } | undefined {
   const match = /^Z3-pulse-loop-pr-([1-9]\d*)$/.exec(basename(p.state));
+  const branchOnly = basename(p.state) === "Z3-pulse-loop-fstar-proofs-junco";
   if (p.reviewedUpstream === undefined) {
-    need(!match, "PR state requires the reviewed publication policy");
+    need(!match && !branchOnly, "publication state requires the reviewed verification policy");
     return undefined;
   }
-  const pr = Number(match?.[1]);
-  need(Number.isSafeInteger(pr) && basename(p.repo) === `pr-${pr}-publisher` && !below(p.state, "/btrfs/Z3-pulse-loop-local"), "not a bound PR campaign path");
+  const pr = branchOnly ? null : Number(match?.[1]);
+  const checkout = branchOnly ? "fstar-proofs-junco-publisher" : `pr-${pr}-publisher`;
+  need((branchOnly || Number.isSafeInteger(pr)) && basename(p.repo) === checkout && !below(p.state, "/btrfs/Z3-pulse-loop-local"), "not a bound publication campaign path");
   need(p.base && OID.test(p.base) && OID.test(p.reviewedUpstream), "PR state requires immutable seed and official upstream commits");
   need(!(directory(p.repo, true).mode & 0o077), "PR publisher checkout must be private");
   const binding = JSON.parse(file(join(p.repo, ".git", "pulse-binding.json")).toString());
+  if (branchOnly) need(binding.branch === "feat/fstar-proofs-junco" && binding.block === "", "wrong branch-only publication binding");
   need(binding.version === 1 && binding.pr === pr && binding.state === p.state && binding.seed === p.base && OID.test(binding.head) && OID.test(binding.upstream), "PR publisher/seed binding mismatch");
   need(Number.isSafeInteger(binding.iteration) && binding.iteration >= 0, "invalid acknowledged PR iteration");
   return binding;
@@ -122,7 +125,7 @@ export function acquire(p: Paths): () => void {
   } catch (e) { if (fd !== undefined) closeSync(fd); conflict(e); }
 }
 
-type Marker = { version: 1; repo: string; base: string; tip: string; config: string; pr?: number };
+type Marker = { version: 1; repo: string; base: string; tip: string; config: string; pr?: number | null };
 function marker(p: Paths): Marker {
   held(p);
   const m = JSON.parse(file(join(p.state, MARKER)).toString()) as Marker;
