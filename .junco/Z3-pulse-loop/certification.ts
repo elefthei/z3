@@ -5,6 +5,7 @@ import { analyze, evaluatorIdentity, judge, prCandidateFailure, refreshQueue, re
 import { extractClaims, type Claim } from './claims.ts';
 import { current, type Paths } from './state.ts';
 import { Publisher, type Parent, atomicJson, check, digest, oid } from './publication.ts';
+import { rememberRebaseFailure } from './recovery.ts';
 import type { Loop } from './wf.ts';
 
 export type Request={pr:number;iteration:number;H:string;M:string;P:string;privateCommit:string;tree:string;patchHash:string;itemId:string;beforeOut:string;beforeHash:string;afterHash:string;evaluator:string};
@@ -42,7 +43,13 @@ export async function certify(pub:Publisher,p:Paths,r:Request,parent:Parent,prio
   const identity=await evaluatorIdentity(left,signal);check(identity===await evaluatorIdentity(right,signal),'Baseline and candidate use different verifiers');
   const reuse=parent.P===r.P && parent.M===r.M && tree===r.tree && identity===r.evaluator;
   const beforeOut=reuse?r.beforeOut:join(attempt,'before'),afterOut=reuse?join(run,'after'):join(attempt,'after');
-  if(!reuse){check(await regress(left,beforeOut,signal),'Rebased baseline did not build');check(await regress(right,afterOut,signal),'Rebased candidate did not build');}
+  if(!reuse){
+    if(!await regress(left,beforeOut,signal)){
+      await rememberRebaseFailure(p,parent,beforeOut);
+      check(false,'Rebased baseline did not build; publication parked for private proof diagnosis');
+    }
+    check(await regress(right,afterOut,signal),'Rebased candidate did not build');
+  }
   const before=await analyze(left,beforeOut,parent.P,signal),after=await analyze(right,afterOut,parent.P,signal);
   check(before.buildOk && before.sha===parent.P && after.sha===parent.P && before.tree===await pub.text(['rev-parse',`${parent.P}^{tree}`]) && after.tree===tree && before.evaluator===identity && after.evaluator===identity && sha256(before.evidenceSha256) && sha256(after.evidenceSha256),'Paired evidence has wrong parent, tree or evaluator');
   if(reuse)check(before.evidenceSha256===r.beforeHash && after.evidenceSha256===r.afterHash,'Original verification evidence no longer matches');

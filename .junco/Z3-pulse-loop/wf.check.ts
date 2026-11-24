@@ -9,6 +9,8 @@ import { ladder, makePublishTool, openCollection, parseMode } from './wf.ts';
 import { checkPublisherParent } from './publication.check.ts';
 import { checkPublication } from './publication.integration.check.ts';
 import { checkClaims } from './claims.check.ts';
+import { checkRecoveryDiagnostic } from './recovery.check.ts';
+import { checkRecoveryProof } from './recovery-verify.check.ts';
 import { paths } from './state.ts';
 import { checkState } from './state.check.ts';
 import './evaluation.check.ts';
@@ -18,10 +20,18 @@ for (const args of [['--publish-pr=7'],['--allow-paid','--publish-pr=0'],['--all
 assert.equal(parseMode(['--allow-paid','--publish-pr=7'],true),undefined);
 assert.equal(parseMode(['--allow-paid','--publish-pr=7'],false)?.pr,7);
 assert.equal(parseMode(['--allow-paid'],false)?.pr,undefined);
+const recovery = '--recover-proof-pr=7', paid = '--allow-paid';
+for (const args of [[recovery],[paid,'--recover-proof-pr'],[paid,'--recover-proof-pr='],[paid,'--recover-proof-pr=0'],[paid,'--recover-proof-pr=07'],[paid,'--recover-proof-pr=-7'],[paid,'--recover-proof-pr=9007199254740992'],[paid,recovery,recovery],[paid,recovery,'--recover-proof-pr=8'],[paid,recovery,'--publish-pr=7'],[paid,recovery,'--once'],[paid,recovery,'--prepare'],[paid,recovery,'--unknown']]) assert.equal(parseMode(args,false),undefined);
+assert.equal(parseMode([paid,recovery],true),undefined);
+assert.deepEqual(parseMode([paid,recovery],false),{pr:undefined,prepareOnly:false,once:false,recoverPr:7});
+assert.throws(()=>execFileSync(process.execPath,['run','loop',paid,recovery],{cwd:import.meta.dir, env:{PATH:process.env.PATH},stdio:'pipe',timeout:10_000}),
+  (e:unknown)=>!!e && typeof e === 'object' && 'status' in e && e.status===64 && 'stderr' in e && String(e.stderr).includes('Invoke wf.ts directly'));
 process.umask(0o077);
 await checkPublisherParent();
 await checkPublication();
 await checkClaims();
+checkRecoveryDiagnostic();
+await checkRecoveryProof();
 const disabled = makePublishTool({paths:paths(), sha:'', iteration:0});
 await assert.rejects(disabled.execute('local',{},undefined), /No verified publication task/);
 await syntax.resolveAgents(syntax.parse(await readFile(new URL('./wf.yml',import.meta.url),'utf8')), { cwd: import.meta.dir, tools:{publish_verified:disabled} });

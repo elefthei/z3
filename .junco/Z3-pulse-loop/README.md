@@ -34,6 +34,14 @@ After `Record` accepts a fully verified change, the same Leader can call `publis
 
 The PR body lists only newly certified pinned inputs and named F* lemmas checked under their declared assumptions. Each row links to a public commit and its source or input. A speedup can advance the PR without adding a claim. The private decision in `result.json` is not a public receipt: check `runs/<iteration>/publication/receipt.json`, the fork ref and the PR. The Git push and body edit are separate operations. Preserve a pending request or intent on exit 78; restarting must not infer authorization from an accepted local commit.
 
+### Failed upstream proof
+
+A cold or rebased parent that fails F* is not a corpus improvement. `ProofRecovery` receives a failing declaration only when the host can tie the strict compiler diagnostic to the official source. If other build inputs differ from `master`, the host first reproduces the same failure on the official tree. Infrastructure failures, changed proofs and ambiguous diagnostics do not trigger a repair.
+
+For a retained failure before service startup, use `bun run wf.ts --allow-paid --recover-proof-pr=N` with the bound campaign environment. A closed or merged PR is ineligible. The tool-free agent gets one proposal: add a scalar type annotation to an existing local binding or insert a checked arithmetic assertion in the failing lemma body. Unsupported proof syntax parks for review. The host runs the unchanged full checker build and all 242 cases in a fresh checkout, without a supervisor, frontend or publication.
+
+Inspect the patch and result under `proof-recovery/` in the private state. A checked repair is for operator review only: it neither makes the original baseline green nor authorizes a push, a claim, or a service switch. Do not remove an attempt to obtain another paid proposal for the same parent.
+
 **Trust boundary:** the worker uses ordinary Btrfs and the operator's Unix UID, not an OS sandbox. The native shell receives a minimal environment, separate home/build scratch and a per-process 1,800 CPU-second limit. Absolute paths and host sockets accessible to that UID remain accessible. Use only an account whose privileges you would give the worker. No agent receives credentials; only the Leader is assigned the bound publication tool. The unauthenticated frontend displays raw messages and tool I/O: use a trusted network. Cgroup pipeline memory is reported only with actual delegation.
 
 ## What counts

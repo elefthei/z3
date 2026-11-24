@@ -1,13 +1,15 @@
 // Literal YAML, scheduler and agent tools. Only the model and verifier measurements are offline fixtures.
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { contentText, fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseStep, type Message } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { agent, graph, JuncoGraph, schedules, syntax, tools, tracer } from 'junco';
+import { agent, graph, schedules, syntax, tools, tracer } from 'junco';
 import type { TSchema } from 'typebox';
-import { campaignParent, failureCode, makePublishTool, recordNode, regressionCycle, runCycle, scheduler, type Loop } from './wf.ts';
-import { StateConflict } from './state.ts';
+import { Analytics, Verify, Record, buildLoop, campaignParent, failureCode, makePublishTool, recordNode, recoveryParent, regressionCycle, runCycle, scheduler, type Loop } from './wf.ts';
+import { current, StateConflict } from './state.ts';
+import type { Recovery } from './recovery.ts';
 import { parts } from './publication.ts';
 import { acceptedGraphFixture } from './publication.integration.check.ts';
 
@@ -27,7 +29,7 @@ const ladder = new schedules.ModelLadder(models,{smol:worker,low:worker,med:work
 const leaderId = graph.NodeId.create('Leader'), recordId = graph.NodeId.create('Record');
 const assignment = 'Formula fixture-case.smt2. Diagnostic: prove fixture obligation #17.';
 const plan = 'Plan: check lemma at fixture#17; falsify using a different key.';
-const expectedTools = {Leader:['find','grep','publish_verified','read'],Developer:['bash','edit','find','grep','read','release']};
+const expectedTools = {Leader:['find','grep','publish_verified','read'],Developer:['bash','edit','find','grep','read','release'],ProofRecovery:[]};
 const call = (id:string) => fauxAssistantMessage([fauxToolCall('publish_verified',{}, {id})],{stopReason:'toolUse'});
 function toolResult(messages: readonly Message[], id: string, error: boolean) {
   const result = messages.find(m => m.role === 'toolResult' && m.toolCallId === id);
@@ -42,6 +44,60 @@ try {
   const fixture = await acceptedGraphFixture();
   closeFixture = fixture.close;
   const {f} = fixture;
+  const p = fixture.context.paths, signal = new AbortController().signal;
+  const baseParent = await recoveryParent(p,f.pub,signal), n = current(p);
+  const head = f.head(), body = f.data.body, writes = f.calls.writes, ref = f.git(p.worktree,'rev-parse','HEAD');
+  f.data.state = 'closed';
+  try { await assert.rejects(recoveryParent(p,f.pub,signal), /PR authority/); }
+  finally { f.data.state = 'open'; }
+  const old = 'let next = fuel - 1 in', proposal = JSON.stringify({old,replacement:'let next : nat = fuel - 1 in'});
+  for (const mode of ['verified','duplicate','rejected','blank','tool-call','short-length','provider-error','stale-parent'] as const) {
+    const parent = baseParent, dir = join(p.state,'proof-recovery-fixture',mode === 'duplicate' ? 'verified' : mode);
+    const r: Recovery = {...parent, pr:f.pub.pr, evaluator:'fixture', dir, out:fixture.context.beforeOut!, file:'fstar/Z3Fixture.fst', line:3, name:'Z3Fixture.prove',
+      source:`let prove (fuel:nat) : Lemma True =\n  if fuel > 0 then\n    ${old} ()`, diagnostic:'F* Error 19: failed to prove: next >= 0'};
+    const x: Loop = {paths:p, publisher:f.pub, parent, sha:parent.P, iteration:n};
+    let measurements = 0, verifications = 0;
+    const code = { Analytics, Verify, Record, Regress:regressionCycle(async () => {
+      measurements++;
+      return mode === 'stale-parent' ? {...r,M:'0'.repeat(40)} : r;
+    }, async (_p,input,answer) => {
+      assert.equal(input,r); assert.equal(answer,proposal); verifications++;
+      return {status:mode === 'verified' ? 'verified' : 'rejected', patch:join(dir,'repair.patch'), tree:ref, out:dir, reason:'fixture verdict', tested:242, ciPass:mode === 'verified'};
+    }) };
+    const execution = await buildLoop(document,{cwd,ladder,collection,code,context:x,tools:{publish_verified:makePublishTool(x)},tracer:new tracer.DummyTracer(),scheduler});
+    try {
+      const calls = faux.state.callCount, assigned = mode !== 'duplicate' && mode !== 'stale-parent';
+      faux.setResponses(assigned ? [ctx=>{
+        assert.ok(existsSync(join(dir,'request.json')), 'reservation precedes provider request');
+        const users = ctx.messages.filter(m=>m.role === 'user').map(m=>contentText(m.content));
+        assert.equal(users.length,2);
+        assert.ok(users[1]!.includes(r.name) && users[1]!.includes(r.diagnostic) && users[1]!.includes(old));
+        assert.ok(!users.join('').includes(p.state), 'private evidence paths are not agent inputs');
+        if (mode === 'short-length') return fauxAssistantMessage('partial',{stopReason:'length'});
+        if (mode === 'provider-error') return fauxAssistantMessage('',{stopReason:'error',errorMessage:'rate limit, retry later'});
+        return mode === 'tool-call' ? call('not-authorized') : fauxAssistantMessage(mode === 'blank' ? ' ' : proposal);
+      }] : []);
+      await execution.run(); assert.equal(measurements,0, 'no work before ingress');
+      await assert.rejects(runCycle(execution,x,n,signal), e=>failureCode([e],true,false,false,false)===78);
+      assert.equal(measurements,1); assert.equal(faux.state.callCount-calls,Number(assigned));
+      const finished = mode === 'verified' || mode === 'rejected';
+      assert.equal(verifications,Number(finished));
+      const sink = execution.graph.result(execution.graph.sink.id);
+      if (finished) {
+        assert.ok(sink._tag === 'Some' && sink.value === `private-proof-recovery:${mode}`);
+        assert.equal(x.recoveryResult?.status,mode);
+        await assert.rejects(runCycle(execution,x,n,signal));
+      } else assert.equal(sink._tag,'None');
+      for (const name of ['Analytics','Leader','Developer','Verify','Record']) {
+        assert.equal(execution.graph.getNode(graph.NodeId.create(name))!.status,'ready',`${name} was activated`);
+      }
+      assert.equal(x.result,undefined); assert.equal(x.publication,undefined);
+      assert.equal(current(p),n); assert.equal(f.git(p.worktree,'rev-parse','HEAD'),ref);
+      assert.equal(f.head(),head); assert.equal(f.data.body,body); assert.equal(f.calls.writes,writes);
+      assert.equal(faux.state.callCount-calls,Number(assigned));
+      console.log(`private proof ${mode}: requests=${Number(assigned)}, verifications=${verifications}, public writes=0`);
+    } finally { await execution.graph.close(); }
+  }
   const modes = ['idle','rejected','ci-red','local-accepted','stale-feedback','blank-writer','aborted-writer','wrong-tree','missing-receipt','blank-leader','nonterminal-leader','cancelled-leader','stale-evidence','measurement','accepted','blank-after-push'] as const;
   let localIteration = 0;
   for (const mode of modes) {
@@ -99,7 +155,7 @@ try {
         return {...privateResult,iteration:mode==='stale-feedback'?iteration-1:iteration,item:selected.item?.id ?? null,ok:false,commit:null,patch:null,after:null,report:input.report,reasons:input.reasons ?? ['idle'],accepted_change:0};
       }),
     };
-    const execution=await JuncoGraph.fromYaml(document,{cwd,ladder,collection,code,context:x,signal:controller.signal,tools:{publish_verified:api},tracer:new tracer.DummyTracer(),scheduler});
+    const execution=await buildLoop(document,{cwd,ladder,collection,code,context:x,signal:controller.signal,tools:{publish_verified:api},tracer:new tracer.DummyTracer(),scheduler});
     try {
       const originalLeader = execution.graph.getNode(leaderId)!.state;
       for(const [node,names] of Object.entries(expectedTools)){
@@ -220,6 +276,7 @@ try {
       if(['idle','local-accepted','rejected','ci-red','accepted'].includes(mode)) expected.push('sink');
       assert.deepEqual(events,expected);
       assert.equal(faux.state.callCount-nBefore,script.length);
+      assert.equal(execution.graph.getNode(graph.NodeId.create('ProofRecovery'))!.status,'ready','ordinary cycle must not activate recovery');
       console.log(`${mode}: ${events.join(' -> ')}`);
     }finally{delete process.env.JUNCO_GRAPH_RUN_DIR; await execution.graph.close();}
   }

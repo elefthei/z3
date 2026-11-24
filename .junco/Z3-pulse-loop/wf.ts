@@ -5,16 +5,19 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { AgentTool } from '@earendil-works/pi-agent-core';
+import { DEFAULT_COMPACTION_SETTINGS, type AgentTool, type PromptTemplate, type Skill } from '@earendil-works/pi-agent-core';
+import { isContextOverflow } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { agent, graph, JuncoGraph, schedules, syntax, tools, tracer } from 'junco';
 import { JuncoFrontend } from 'junco-frontend';
 import { Type, type TArray, type TSchema } from 'typebox';
 import { analyze, analyticsMarkdown, baseline, evaluationPaths, EvaluationConfigError, metrics, pickItem, prCandidateFailure, refreshQueue, regress, sh, type Analysis, type Item, type Run } from './evaluation.ts';
 import { acquire, adoptPrParent, capture, current, next, paths, prepare, readQueue, record, saveQueue, StateConflict, verificationPaths, type Attempt, type LocalResult, type Paths } from './state.ts';
-import { Publisher, atomicJson, check, digest, parts, type Parent } from './publication.ts';
+import { Publisher, atomicJson, check, digest, oid, parts, type Parent } from './publication.ts';
 import { requestPublication, type certify, type Request } from './certification.ts';
 import { publish, reconcile, type Receipt } from './transaction.ts';
+import { beginRecovery, ensureNoRecovery, recoveryInput, type Recovery } from './recovery.ts';
+import { verifyRecovery, type RecoveryResult } from './recovery-verify.ts';
 import { pairedRecorder } from './telemetry.ts';
 
 type Edges = syntax.CodeContext["edges"];
@@ -269,7 +272,41 @@ export type Loop = {
   paths: Paths; sha: string; iteration: number; collection?: tools.ToolCollection;
   selected?: Selected; attempt?: Attempt | null; verification?: Verification; reasons?: string[]; result?: LocalResult;
   publisher?: Publisher; parent?: Parent; beforeOut?: string; publication?: PublicationTurn;
+  recoveryOnly?: Recovery; activeRecovery?: Recovery; recoveryResult?: RecoveryResult;
 };
+
+/** Pi can retry, compact, or follow a tool error inside one graph turn. Bound the actual request. */
+export async function buildLoop(document: syntax.JuncoDocument, options: syntax.BuildOptions<Loop> & {context:Loop; ladder:schedules.ModelLadder}) {
+  const created: AsyncDisposable[] = [];
+  const createAgent = async (spec: syntax.AgentSpec) => {
+    const {model,thinking} = options.ladder.rungs.med, slash = model.indexOf('/');
+    const role = spec.node !== 'ProofRecovery' ? await syntax.createJuncoAgent(spec,options.ladder)
+      : await agent.JuncoAgent.create<Skill,PromptTemplate,TSchema,unknown>({
+        provider:model.slice(0,slash), model:model.slice(slash+1), models:options.ladder.models, thinkingLevel:thinking,
+        cwd:options.context.paths.repo, systemPrompt:spec.systemPrompt, tool_block:spec.tool_block,
+        recorder:spec.recorder, recorderNodeId:spec.recorderNodeId,
+        retry:{enabled:false,maxRetries:0,baseDelayMs:0}, streamOptions:{maxRetries:0},
+        compaction:{...DEFAULT_COMPACTION_SETTINGS,enabled:false},
+      });
+    if (spec.node === 'ProofRecovery') {
+      const window = options.ladder.models.getModel(model.slice(0,slash),model.slice(slash+1))!.contextWindow;
+      // Reject continuations before Pi schedules tools, deferred polls or overflow recovery.
+      role.hooks.on('after_response', async ({message}) => {
+        if (message.stopReason === 'stop' && !message.content.some(c=>c.type === 'toolCall') && !isContextOverflow(message,window)) return;
+        return {message:{...message, deferred:undefined, content:[], stopReason:'error', errorMessage:'ProofRecovery requires one normal tool-free response'}};
+      });
+    }
+    created.push(role);
+    return role;
+  };
+  const available = {...options.available, ProofRecovery: () => (_view:graph.ParentView<TSchema,unknown>, triggered:boolean) => triggered && !!options.context.activeRecovery};
+  try { return await JuncoGraph.fromYaml(document,{...options,available,createAgent}); }
+  catch (cause) {
+    // The pinned builder transfers factory agents to the graph only on construction success.
+    await Promise.all(created.map(role=>role[Symbol.asyncDispose]()));
+    throw cause;
+  }
+}
 const leaderReturn = (p: Paths, i: number) => join(p.state, 'runs', String(i), 'publication', 'leader-return.json');
 
 export function makePublishTool(x: Loop, fixtureVerify?: typeof certify): AgentTool {
@@ -281,7 +318,7 @@ export function makePublishTool(x: Loop, fixtureVerify?: typeof certify): AgentT
     execute: async (_id, args, signal) => {
       const pub = x.publisher, permit = x.publication;
       check(typeof args === 'object' && args !== null && !Array.isArray(args) && !Object.keys(args).length, 'publish_verified accepts only an empty object');
-      check(process.env.JUNCO_GRAPH_RUN_DIR === undefined && pub && permit && permit.leader.status === 'running', 'No verified publication task is active');
+      check(!x.recoveryOnly && !x.activeRecovery && process.env.JUNCO_GRAPH_RUN_DIR === undefined && pub && permit && permit.leader.status === 'running', 'No verified publication task is active');
       const r = permit.request, result = x.result, after = x.verification?.after;
       check(r.pr === pub.pr && r.iteration === x.iteration && r.P === x.sha && r.H === x.parent?.H && r.M === x.parent.M && r.P === x.parent.P &&
         result?.ok && result.ciPass && result.accepted_change === 1 && result.commit === r.privateCommit && result.base === r.P && result.iteration === r.iteration &&
@@ -394,20 +431,47 @@ export function startCycle(g: JuncoGraph<TSchema, unknown>, previous: number) {
   g.source.enqueue({ messages: new Map([[E('start'), [previous]]]), values: new Map() });
 }
 
-/** A cycle cannot finish (or start a fresh set of agents) until Record sends back its own verdict. */
-export function regressionCycle<C>(measure: (c: syntax.CodeContext<C>, signal: AbortSignal, previous: number) => Promise<{sha: string; out: string}>): syntax.DeterministicNode<C> {
-  return c => ({
-    state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
-      const start = (yield []).messages.get(E('$source~>Regress'));
-      if (start?.length !== 1 || !Number.isSafeInteger(start[0])) throw Error('Expected one starting iteration');
-      const previous = Number(start[0]);
-      const base = await measure(c, signal, previous);
-      const feedback = yield [graph.Message.create(c.edges.get('Regress~>Analytics')!, base)];
-      const verdict = feedback.values.get(E('Record->Regress')) as LocalResult | undefined;
-      if (!verdict || verdict.iteration !== previous + 1 || verdict.base !== base.sha) throw new StateConflict('Missing or stale Record feedback');
-      return verdict;
-    }, c.policy),
-  });
+/** One ingress, then exactly the reply from the selected branch. Never start from retained feedback. */
+export function regressionCycle<C extends Loop = Loop>(
+  measure: (c: syntax.CodeContext<C>, signal: AbortSignal, previous: number) => Promise<{sha: string; out: string} | Recovery>,
+  verify = verifyRecovery,
+): syntax.DeterministicNode<C> {
+  return c => {
+    const x = c.context, start = E('$source~>Regress'), record = E('Record->Regress'), proof = E('ProofRecovery->Regress');
+    let waiting = start;
+    return {
+      state: new graph.nodes.Deterministic<TSchema, unknown>(async function* (signal) {
+        const ingress = yield [];
+        const batch = ingress.messages.get(start);
+        check(batch?.length === 1 && Number.isSafeInteger(batch[0]) && !ingress.values.has(record) && !ingress.values.has(proof), 'Missing or stale cycle ingress');
+        const previous = Number(batch[0]);
+        const base = await measure(c, signal, previous);
+        if ('P' in base) {
+          check(base.P === x.sha && base.P === x.parent?.P && base.H === x.parent.H && base.M === x.parent.M && base.pr === (x.publisher?.pr ?? x.recoveryOnly?.pr), 'Stale proof recovery binding');
+          check(verify === verifyRecovery || x.publisher?.isFixture, 'Only a local fixture may substitute repair verification');
+          const node = c.graph.getNode(graph.NodeId.create('ProofRecovery'));
+          check(node?.state instanceof agent.JuncoAgent && !node.state.getActiveTools().length, 'ProofRecovery requires the tool-free role');
+          const text = `${base.name} (${base.file}:${base.line})\nDiagnostic: ${base.diagnostic}\n\nDeclaration:\n${base.source}`;
+          const task = graph.nodes.Task.create({kind:'prompt', text, spec:'Return only the exact JSON proof-body substitution.'});
+          try { await beginRecovery(base); }
+          catch (cause) { throw new StateConflict('Proof recovery reservation refused; no model request allowed', {cause}); }
+          x.activeRecovery = base;
+          waiting = proof;
+          const reply = yield [graph.Message.create(c.edges.get('Regress~>ProofRecovery')!, task)];
+          const answer = reply.values.get(proof), final = c.graph.result(node.id);
+          check(!reply.messages.get(start)?.length && !reply.values.has(record) && final._tag === 'Some' && answer === final.value, 'Missing or stale ProofRecovery feedback');
+          x.recoveryResult = await verify(x.paths, base, syntax.finalText(answer, 'ProofRecovery'), signal);
+          return `private-proof-recovery:${x.recoveryResult.status}`;
+        }
+        waiting = record;
+        const feedback = yield [graph.Message.create(c.edges.get('Regress~>Analytics')!, base)];
+        const verdict = feedback.values.get(record) as LocalResult | undefined;
+        check(!feedback.messages.get(start)?.length && !feedback.values.has(proof) && verdict && verdict.iteration === previous + 1 && verdict.base === base.sha, 'Missing or stale Record feedback');
+        return verdict;
+      }, c.policy),
+      is_available: view => waiting === start ? !!view.messages.get(start)?.length : view.values.has(waiting),
+    };
+  };
 }
 
 export async function campaignParent(p: Paths, publisher: Publisher, signal: AbortSignal) {
@@ -437,12 +501,20 @@ export async function campaignParent(p: Paths, publisher: Publisher, signal: Abo
 
 export const Regress = regressionCycle<Loop>(async (c, signal, previous) => {
   const x = c.context;
-  if (x.publisher) x.parent = await campaignParent(x.paths,x.publisher,signal);
+  if (x.recoveryOnly) return x.recoveryOnly;
+  if (x.publisher) {
+    x.parent = await campaignParent(x.paths,x.publisher,signal);
+    try { await ensureNoRecovery(x.paths,x.parent); }
+    catch (cause) { throw new StateConflict('An existing repair requires operator review; no new baseline or paid turn', {cause}); }
+  }
   x.sha = x.parent?.P ?? await prepare(x.paths,signal);
   if (current(x.paths) !== previous) throw new StateConflict('Starting iteration differs from private state');
   x.iteration = next(x.paths);
   log(`iteration ${x.iteration}: regressing ${x.sha}`);
-  return withRunner(c, run => baseline(x.paths, x.sha, signal, run));
+  const base = await withRunner(c, run => baseline(x.paths, x.sha, signal, run));
+  if (!x.publisher || !x.parent) return base;
+  try { return await recoveryInput(x.paths,x.publisher,x.parent,base.out,signal) ?? base; }
+  catch (cause) { throw new StateConflict('Cannot authenticate the PR baseline for routing', {cause}); }
 });
 export const Analytics: syntax.DeterministicNode<Loop> = c => {
   let published = false;
@@ -594,21 +666,72 @@ export function failureCode(failures: unknown[], running: boolean, aborted: bool
   return running ? 1 : 78;
 }
 
-export async function runCycle(execution: {graph: JuncoGraph<TSchema, unknown>; run(options: {signal: AbortSignal}): Promise<unknown>}, x: Loop, previous: number, signal: AbortSignal) {
+type Execution = {graph: JuncoGraph<TSchema, unknown>; run(options: {signal: AbortSignal}): Promise<unknown>};
+async function terminal(execution: Execution, x: Loop, previous: number, signal: AbortSignal) {
   try {
+    check(!Object.hasOwn(x,'activeRecovery') && !Object.hasOwn(x,'recoveryResult') && execution.graph.result(execution.graph.sink.id)._tag === 'None', 'A completed graph cannot accept fresh ingress');
     startCycle(execution.graph, previous);
     await execution.run({signal});
     signal.throwIfAborted();
     const sink = execution.graph.result(execution.graph.sink.id);
+    if (x.activeRecovery) {
+      check(x.recoveryResult && sink._tag === 'Some' && sink.value === `private-proof-recovery:${x.recoveryResult.status}` && !x.selected && !x.verification && !x.result && !x.publication, 'Missing or mixed private recovery result');
+      return x.recoveryResult;
+    }
     if (sink._tag !== 'Some' || !x.result || !x.verification || !x.selected || sink.value !== x.result || x.result.iteration !== x.iteration || x.result.base !== x.sha || x.result.item !== (x.selected.item?.id ?? null)) throw Error('Missing or stale terminal verdict');
     return { result: x.result, selected: x.selected, verification: x.verification };
   } catch (cause) {
+    if (x.activeRecovery) throw new StateConflict('Private proof recovery did not finish; preserve the reservation and evidence', {cause});
     if (x.publisher && x.result?.ok) throw new StateConflict(`Publication of iteration ${x.iteration} on PR #${x.publisher.pr} did not finish; reconcile preserved evidence`, {cause});
     throw cause;
   } finally { delete x.publication; }
 }
 
+export async function runCycle(execution: Execution, x: Loop, previous: number, signal: AbortSignal) {
+  const done = await terminal(execution,x,previous,signal);
+  if ('status' in done) throw new StateConflict(`Private proof recovery ${done.status}; evidence at ${x.activeRecovery!.dir}. Campaign parked for operator review.`);
+  return done;
+}
+
+/** Read the already-retained parent; recovery cannot reconcile, rebase or advance either checkout. */
+export async function recoveryParent(p: Paths, pub: Publisher, signal: AbortSignal): Promise<Parent> {
+  current(p); // requires the bound, initialized state lock
+  const binding = await pub.binding(), {H,M,pr} = await pub.observed(signal);
+  check(pub.repo === p.repo && pub.state === p.state && binding.seed === p.base && binding.head === H && binding.block === parts(pr.body).block, 'Recovery PR binding changed');
+  const P = oid(await pub.text(['rev-parse','--verify',`refs/pulse/parents/${H}/${M}^{commit}`],pub.repo,signal));
+  const checkout = await pub.text(['rev-parse','--show-toplevel','--absolute-git-dir','HEAD'],pub.repo,signal);
+  check(checkout === `${pub.repo}\n${join(pub.repo,'.git')}\n${P}`, 'Publisher is not at the retained proof recovery parent');
+  await pub.git(['merge-base','--is-ancestor',M,P],pub.repo,undefined,signal);
+  const entries = await pub.text(['ls-files','-v','-z'],pub.repo,signal);
+  check(entries.split('\0').every(e=>!e || e.startsWith('H ')) && !await pub.text(['--no-optional-locks','status','--porcelain=v1','--ignored','--untracked-files=all','--ignore-submodules=none'],pub.repo,signal), 'Dirty or masked proof recovery parent');
+  p.reviewedUpstream = M;
+  return {H,M,P};
+}
+
+async function recoverOnce(document: syntax.JuncoDocument, p: Paths, pub: Publisher, signal: AbortSignal) {
+  const parent = await recoveryParent(p,pub,signal);
+  const r = await recoveryInput(p,pub,parent,undefined,signal);
+  if (!r) { log('No eligible inherited proof failure; no repair requested.'); return; }
+  const context: Loop = {paths:p, parent, sha:parent.P, iteration:current(p), recoveryOnly:r};
+  const execution = await buildLoop(document, {
+    cwd:pub.repo, scheduler, ladder:await loadLadder(signal), signal, tracer:new tracer.DummyTracer(),
+    tools:{publish_verified:makePublishTool(context)}, code:{Regress,Analytics,Verify,Record}, context,
+  });
+  try {
+    const done = await terminal(execution,context,context.iteration,signal);
+    check('status' in done && done === context.recoveryResult, 'Recovery did not return a private verification result');
+    console.log(JSON.stringify({privateRecovery:done.status, evidence:r.dir, tree:done.tree, tested:done.tested, ciPass:done.ciPass}));
+    check(done.status === 'verified', 'Private proof repair rejected; evidence preserved');
+  } finally { await execution.graph.close(); }
+}
+
 export function parseMode(args: string[], measuring: boolean) {
+  const recovery = args.find(a=>a.startsWith('--recover-proof-pr='));
+  if (recovery !== undefined) {
+    const match = /^--recover-proof-pr=([1-9]\d*)$/.exec(recovery), recoverPr = Number(match?.[1]);
+    if (measuring || args.length !== 2 || !args.includes('--allow-paid') || !Number.isSafeInteger(recoverPr)) return;
+    return {pr:undefined, prepareOnly:false, once:false, recoverPr};
+  }
   const opts=args.filter(a=>a.startsWith('--publish-pr='));
   if (opts.length>1 || new Set(args).size!==args.length || args.some(a=>!['--prepare','--once','--allow-paid'].includes(a) && !/^--publish-pr=[1-9]\d*$/.test(a))) return;
   const pr=opts.length ? Number(opts[0]!.slice('--publish-pr='.length)) : undefined;
@@ -620,8 +743,8 @@ export function parseMode(args: string[], measuring: boolean) {
 
 async function main(args: string[], signal: AbortSignal) {
   const mode=parseMode(args,process.env.JUNCO_GRAPH_RUN_DIR!==undefined);
-  if (!mode) { console.error('usage: bun run wf.ts --prepare | [--once] --allow-paid | --allow-paid --publish-pr=N'); return 64; }
-  const {prepareOnly,once,pr}=mode;
+  if (!mode) { console.error('usage: bun run wf.ts --prepare | [--once] --allow-paid | --allow-paid --publish-pr=N | --allow-paid --recover-proof-pr=N'); return 64; }
+  const {prepareOnly,once,pr,recoverPr}=mode;
   const failures: unknown[] = [];
   let request: GraphRun | undefined, hash = "", measured: Record<string, number> | undefined;
   let unlock: (()=>void) | undefined, frontend: JuncoFrontend | undefined, recorder: tracer.ProfileRecorder<string> | undefined, collection: tools.ToolCollection | undefined;
@@ -634,21 +757,27 @@ async function main(args: string[], signal: AbortSignal) {
       if (hash !== request.expectedGraphHash || !once || !process.env.Z3_PULSE_LOOP_EXPECT_ITEM) throw Error("Measurement requires the nonce-bound graph, --once and a frozen item");
     }
     const p = paths();
-    const publisher=pr===undefined ? undefined : await Publisher.live(pr,p);
+    const number = pr ?? recoverPr;
+    const publisher=number===undefined ? undefined : await Publisher.live(number,p);
     if (publisher) {
       const binding = await publisher.binding();
       p.base = binding.seed;
       p.reviewedUpstream = binding.upstream;
     }
+    if (recoverPr !== undefined) check(existsSync(p.state), 'Recovery requires an existing PR campaign');
     unlock = acquire(p);
-    const sha=publisher ? (await campaignParent(p,publisher,signal)).P : await prepare(p,signal);
-    if (prepareOnly) {
+    if (recoverPr !== undefined) {
+      await recoverOnce(document,p,publisher!,signal);
+    } else if (prepareOnly) {
+      const sha = await prepare(p,signal);
       const base = await baseline(p, sha, signal);
       const selected = await selection(p, base, signal);
       if (!selected.before.buildOk) throw Error(`Base ${sha} did not build: ${base.out}`);
       await writeFile(join(p.state,'selected.json'), JSON.stringify({ item: selected.item?.id ?? null, text: selected.text, spec: SPEC, sha, out:base.out, metrics:metrics(selected.before) })+'\n');
       console.log(selected.item?.id ?? '');
     } else {
+      if (publisher) await campaignParent(p,publisher,signal);
+      else await prepare(p,signal);
       const models = await loadLadder(signal);
       frontend = await JuncoFrontend.listen({ host: '0.0.0.0', port: 3000 });
       const page = await fetch('http://127.0.0.1:3000/', { signal });
@@ -670,7 +799,7 @@ async function main(args: string[], signal: AbortSignal) {
       do {
         signal.throwIfAborted();
         const context: Loop = { paths:p, sha:'', iteration:0, publisher, collection:monitored ? collection : undefined };
-        const execution = await JuncoGraph.fromYaml(document, {
+        const execution = await buildLoop(document, {
           cwd:p.worktree, scheduler, ladder:models, collection, signal, recorder, tracer:frontend,
           tools:{publish_verified:makePublishTool(context)},
           code:withOptimizerCode<Loop>({Regress,Analytics,Verify,Record}, ASSIGNMENTS), context,
@@ -679,7 +808,7 @@ async function main(args: string[], signal: AbortSignal) {
         running = true;
         const {result, selected, verification} = await runCycle(execution, context, previous, signal).finally(async () => {
           try { await execution.graph.close(); }
-          catch (cause) { if (publisher && context.result?.ok) throw new StateConflict('PR graph did not close cleanly', {cause}); throw cause; }
+          catch (cause) { if (context.activeRecovery || publisher && context.result?.ok) throw new StateConflict('PR graph did not close cleanly', {cause}); throw cause; }
         });
         previous = result.iteration;
         await recorder.flush();
@@ -704,7 +833,7 @@ async function main(args: string[], signal: AbortSignal) {
   }
   if (failures.length) {
     for (const e of failures) console.error(e);
-    return failureCode(failures, running, signal.aborted, once || prepareOnly, failures.length > beforeClose);
+    return failureCode(failures, running, signal.aborted, once || prepareOnly || recoverPr !== undefined, failures.length > beforeClose);
   }
   if (request) {
     signal.throwIfAborted();
